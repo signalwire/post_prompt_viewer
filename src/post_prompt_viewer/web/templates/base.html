@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Post Prompt Viewer{% endblock %}</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&family=Lexend:wght@300;400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="{{ url_for('static', path='/css/app.css') }}">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="{{ url_for('index') }}">
+      <img class="brand-logo logo-dark" src="{{ url_for('static', path='/signalwire-logo.svg') }}" alt="SignalWire">
+      <img class="brand-logo logo-light" src="{{ url_for('static', path='/signalwire-logo-light.svg') }}" alt="SignalWire">
+      <span class="brand-name">Post Prompt Viewer</span>
+    </a>
+    <div class="topbar-actions">
+      {% block topbar %}{% endblock %}
+      <button class="theme-toggle" id="theme-toggle" title="Toggle light / dark" aria-label="Toggle theme">◐</button>
+    </div>
+  </header>
+  <main class="container">
+    {% block content %}{% endblock %}
+  </main>
+  <script src="{{ url_for('static', path='/js/app.js') }}"></script>
+  {% block scripts %}{% endblock %}
+</body>
+</html>

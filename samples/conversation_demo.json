@@ -1,0 +1,406 @@
+{
+  "action": "post_conversation",
+  "app_name": "demo agent",
+  "call_id": "00000000-0000-4000-8000-000000000001",
+  "ai_session_id": "demo-session-0001",
+  "ai_id_tag": "demoidtag00000000000000000000000",
+  "project_id": "demo-project-0000",
+  "space_id": "demo-space-0000",
+  "conversation_type": "voice",
+  "caller_id_name": "Demo Caller",
+  "caller_id_number": "+15555550123",
+  "content_disposition": "agent.summary",
+  "content_type": "text/json",
+  "call_start_date": 1700000000000000,
+  "call_answer_date": 1700000001000000,
+  "call_end_date": 1700000090000000,
+  "ai_start_date": 1700000002000000,
+  "ai_end_date": 1700000088000000,
+  "total_minutes": 2,
+  "total_input_tokens": 1500,
+  "total_output_tokens": 90,
+  "total_wire_input_tokens": 1200,
+  "total_wire_input_tokens_per_minute": 600,
+  "total_wire_output_tokens": 90,
+  "total_wire_output_tokens_per_minute": 45,
+  "total_tts_chars": 220,
+  "total_tts_chars_per_min": 110.0,
+  "total_asr_minutes": 1.5,
+  "total_asr_cost_factor": 1.0,
+  "call_log": [
+    {
+      "role": "system",
+      "timestamp": 1700000001000000,
+      "content": "You are the Acme demo assistant. Help callers with billing and account questions. Be concise and friendly."
+    },
+    {
+      "role": "system-log",
+      "action": "session_start",
+      "timestamp": 1700000002000000,
+      "tokens": 0,
+      "content_type": "Detected Speech",
+      "lang": "en-US",
+      "content": "AI session started",
+      "metadata": {
+        "context": "default",
+        "model": "demo-model-v1",
+        "step": "main",
+        "step_index": 0
+      }
+    },
+    {
+      "role": "assistant-thinking",
+      "timestamp": 1700000003000000,
+      "content": "Greet the caller and offer help."
+    },
+    {
+      "role": "assistant",
+      "timestamp": 1700000005000000,
+      "start_timestamp": 1700000003000000,
+      "end_timestamp": 1700000007000000,
+      "content": "Hi! I'm the Acme demo assistant. How can I help you today?",
+      "latency": 120,
+      "utterance_latency": 400,
+      "audio_latency": 900
+    },
+    {
+      "role": "user",
+      "timestamp": 1700000012000000,
+      "start_timestamp": 1700000010000000,
+      "end_timestamp": 1700000012000000,
+      "content": "How do I add funds to my account?",
+      "confidence": 0.97,
+      "content_type": "Detected Speech"
+    },
+    {
+      "role": "assistant",
+      "timestamp": 1700000013000000,
+      "tool_calls": [
+        {
+          "id": "call_1",
+          "type": "function",
+          "function": {
+            "name": "search_docs",
+            "arguments": "{\"query\": \"add funds to account\"}"
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "timestamp": 1700000016000000,
+      "start_timestamp": 1700000013500000,
+      "end_timestamp": 1700000016000000,
+      "function_name": "search_docs",
+      "content": "Funds can be added from the billing page in the dashboard.",
+      "latency": 150,
+      "function_latency": 600,
+      "execution_latency": 1100
+    },
+    {
+      "role": "assistant",
+      "timestamp": 1700000019000000,
+      "start_timestamp": 1700000017000000,
+      "end_timestamp": 1700000021000000,
+      "content": "You can add funds from the billing page in your dashboard.",
+      "latency": 180,
+      "utterance_latency": 500,
+      "audio_latency": 1000
+    },
+    {
+      "role": "user",
+      "timestamp": 1700000026000000,
+      "start_timestamp": 1700000024000000,
+      "end_timestamp": 1700000026000000,
+      "content": "Great, thanks!",
+      "confidence": 0.95,
+      "content_type": "Detected Speech"
+    },
+    {
+      "role": "assistant-thinking",
+      "timestamp": 1700000027000000,
+      "content": "Close the conversation politely."
+    },
+    {
+      "role": "assistant",
+      "timestamp": 1700000030000000,
+      "start_timestamp": 1700000028000000,
+      "end_timestamp": 1700000032000000,
+      "content": "You're welcome. Have a great day!",
+      "latency": 110,
+      "utterance_latency": 450,
+      "audio_latency": 800
+    },
+    {
+      "role": "system",
+      "timestamp": 1700000033000000,
+      "content": "The conversation has been ended by the user."
+    }
+  ],
+  "raw_call_log": [
+    {
+      "role": "system",
+      "timestamp": 1700000001000000,
+      "content": "You are the Acme demo assistant. Help callers with billing and account questions. Be concise and friendly."
+    },
+    {
+      "role": "system-log",
+      "action": "session_start",
+      "timestamp": 1700000002000000,
+      "tokens": 0,
+      "content_type": "Detected Speech",
+      "lang": "en-US",
+      "content": "AI session started",
+      "metadata": {
+        "context": "default",
+        "model": "demo-model-v1",
+        "step": "main",
+        "step_index": 0
+      }
+    },
+    {
+      "role": "assistant-thinking",
+      "timestamp": 1700000003000000,
+      "content": "Greet the caller and offer help."
+    },
+    {
+      "role": "assistant-thinking",
+      "timestamp": 1700000004000000,
+      "content": "Pick a warm greeting."
+    },
+    {
+      "role": "assistant",
+      "timestamp": 1700000005000000,
+      "start_timestamp": 1700000003000000,
+      "end_timestamp": 1700000007000000,
+      "content": "Hi! I'm the Acme demo assistant. How can I help you today?",
+      "latency": 120,
+      "utterance_latency": 400,
+      "audio_latency": 900
+    },
+    {
+      "role": "user",
+      "timestamp": 1700000012000000,
+      "start_timestamp": 1700000010000000,
+      "end_timestamp": 1700000012000000,
+      "content": "How do I add funds to my account?",
+      "confidence": 0.97,
+      "content_type": "Detected Speech"
+    },
+    {
+      "role": "assistant",
+      "timestamp": 1700000013000000,
+      "tool_calls": [
+        {
+          "id": "call_1",
+          "type": "function",
+          "function": {
+            "name": "search_docs",
+            "arguments": "{\"query\": \"add funds to account\"}"
+          }
+        }
+      ]
+    },
+    {
+      "role": "assistant-thinking",
+      "timestamp": 1700000014000000,
+      "content": "Search the docs first."
+    },
+    {
+      "role": "assistant-manual",
+      "timestamp": 1700000015000000,
+      "content": "Let me check that for you."
+    },
+    {
+      "role": "tool",
+      "timestamp": 1700000016000000,
+      "start_timestamp": 1700000013500000,
+      "end_timestamp": 1700000016000000,
+      "function_name": "search_docs",
+      "content": "Funds can be added from the billing page in the dashboard.",
+      "latency": 150,
+      "function_latency": 600,
+      "execution_latency": 1100
+    },
+    {
+      "role": "assistant",
+      "timestamp": 1700000019000000,
+      "start_timestamp": 1700000017000000,
+      "end_timestamp": 1700000021000000,
+      "content": "You can add funds from the billing page in your dashboard.",
+      "latency": 180,
+      "utterance_latency": 500,
+      "audio_latency": 1000
+    },
+    {
+      "role": "user",
+      "timestamp": 1700000026000000,
+      "start_timestamp": 1700000024000000,
+      "end_timestamp": 1700000026000000,
+      "content": "Great, thanks!",
+      "confidence": 0.95,
+      "content_type": "Detected Speech"
+    },
+    {
+      "role": "assistant-thinking",
+      "timestamp": 1700000027000000,
+      "content": "Close the conversation politely."
+    },
+    {
+      "role": "assistant",
+      "timestamp": 1700000030000000,
+      "start_timestamp": 1700000028000000,
+      "end_timestamp": 1700000032000000,
+      "content": "You're welcome. Have a great day!",
+      "latency": 110,
+      "utterance_latency": 450,
+      "audio_latency": 800
+    },
+    {
+      "role": "system",
+      "timestamp": 1700000033000000,
+      "content": "The conversation has been ended by the user."
+    }
+  ],
+  "call_timeline": [
+    {
+      "ts": 1700000002000000,
+      "type": "session_start",
+      "context": "default",
+      "model": "demo-model-v1",
+      "step": "main",
+      "step_index": 0
+    },
+    {
+      "ts": 1700000005000000,
+      "type": "ai_response",
+      "latency": 120,
+      "utterance_latency": 400,
+      "audio_latency": 900
+    },
+    {
+      "ts": 1700000012000000,
+      "type": "user_input",
+      "confidence": 97.0,
+      "content_type": "Detected Speech"
+    },
+    {
+      "ts": 1700000015000000,
+      "type": "function_call",
+      "function": "search_docs",
+      "native": false,
+      "duration_ms": 600
+    },
+    {
+      "ts": 1700000016000000,
+      "type": "tool_result",
+      "function_name": "search_docs",
+      "latency": 150,
+      "execution_latency": 1100
+    },
+    {
+      "ts": 1700000019000000,
+      "type": "ai_response",
+      "latency": 180,
+      "utterance_latency": 500,
+      "audio_latency": 1000
+    },
+    {
+      "ts": 1700000026000000,
+      "type": "user_input",
+      "confidence": 95.0,
+      "content_type": "Detected Speech"
+    },
+    {
+      "ts": 1700000030000000,
+      "type": "ai_response",
+      "latency": 110,
+      "utterance_latency": 450,
+      "audio_latency": 800
+    }
+  ],
+  "times": [
+    {
+      "response": "Hi! I'm the Acme demo assistant. How can I help you today?",
+      "tps": 90.0,
+      "avg_tps": 88.0,
+      "answer_time": 0.5,
+      "token_time": 0.4,
+      "tokens": 14,
+      "response_word_count": 11
+    },
+    {
+      "response": " Let me check that for you.",
+      "tps": 50.0,
+      "avg_tps": 49.0,
+      "answer_time": 0.3,
+      "token_time": 0.25,
+      "tokens": 6,
+      "response_word_count": 6
+    },
+    {
+      "response": "You can add funds from the billing page in your dashboard.",
+      "tps": 120.0,
+      "avg_tps": 118.0,
+      "answer_time": 0.8,
+      "token_time": 0.6,
+      "tokens": 12,
+      "response_word_count": 11
+    },
+    {
+      "response": "You're welcome. Have a great day!",
+      "tps": 100.0,
+      "avg_tps": 99.0,
+      "answer_time": 0.4,
+      "token_time": 0.3,
+      "tokens": 8,
+      "response_word_count": 6
+    }
+  ],
+  "swaig_log": [
+    {
+      "command_name": "search_docs",
+      "command_arg": "{\"query\": \"add funds to account\"}",
+      "epoch_time": 1700000015,
+      "active_count": "endless",
+      "url": "https://demo.example.com/swaig/search_docs",
+      "post_data": {
+        "app_name": "demo agent",
+        "argument": {
+          "parsed": [
+            {
+              "query": "add funds to account"
+            }
+          ]
+        }
+      },
+      "post_response": {
+        "response": "Funds can be added from the billing page in the dashboard.",
+        "action": []
+      }
+    }
+  ],
+  "global_data": {
+    "demo_flag": true,
+    "search_provider": "Demo",
+    "caller_id_name": "Demo Caller",
+    "caller_id_number": "+15555550123"
+  },
+  "post_prompt_data": {
+    "parsed": [],
+    "raw": "The caller asked how to add funds and was directed to the billing page in the dashboard.",
+    "substituted": "The caller asked how to add funds and was directed to the billing page in the dashboard."
+  },
+  "SWMLVars": {
+    "record_call_url": "https://recordings.example.com/demo/sample-call.wav",
+    "record_call_start": 1700000002000000,
+    "record_call_result": "success",
+    "record_control_id": "demo-control-0001",
+    "ai_result": "success",
+    "answer_result": "success",
+    "userVariables": {},
+    "ai_agents_global_data": {
+      "demo_flag": true
+    }
+  }
+}

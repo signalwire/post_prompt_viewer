@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Runtime data (SQLite db, recording cache, transcodes)
+data/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.db
+
+# Service runner artifacts
+*.pid
+*.log
+ppv.env
+
+# Internal findings handoff (not part of the open-source repo)
+FINDINGS.md
+
+# Ad-hoc call payloads dropped in the repo root (the curated sample is in samples/)
+/conversation_*.json
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/

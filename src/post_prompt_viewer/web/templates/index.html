@@ -1,0 +1,95 @@
+{% extends "base.html" %}
+{% block title %}Conversations · Post Prompt Viewer{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>Conversations</h1>
+  <div style="display:flex; align-items:center; gap:14px">
+    <span class="count">{{ total }} call{{ '' if total == 1 else 's' }}</span>
+    <button class="btn" id="upload-btn" data-upload-url="{{ url_for('upload') }}">Upload JSON</button>
+    <input type="file" id="upload-input" accept="application/json,.json" hidden>
+  </div>
+</div>
+
+<div class="collecturl">
+  <span class="eyebrow">post_prompt_url</span>
+  <code id="collect-url" data-prefix="{{ prefix }}" data-user="{{ collect_user }}" data-pass="{{ collect_pass }}"></code>
+  <button class="btn secondary" type="button" id="copy-collect">Copy</button>
+  {% if collect_auth_open %}<span class="note">viewer is open &mdash; set <code>PPV_AUTH_*</code> to include the login in this URL</span>{% endif %}
+</div>
+
+<form class="filterbar" id="filter-form" method="get" action="{{ url_for('index') }}">
+  <input type="search" name="q" placeholder="Search transcripts…" value="{{ filters.q }}">
+  <select name="app" aria-label="App">
+    <option value="">All apps</option>
+    {% for a in apps %}<option value="{{ a }}" {{ 'selected' if a == filters.app }}>{{ a }}</option>{% endfor %}
+  </select>
+  <select name="rec" aria-label="Recording filter">
+    <option value="">Recording: any</option>
+    <option value="1" {{ 'selected' if filters.rec == '1' }}>Has recording</option>
+    <option value="0" {{ 'selected' if filters.rec == '0' }}>No recording</option>
+  </select>
+  <select name="err" aria-label="Error filter">
+    <option value="">Errors: any</option>
+    <option value="1" {{ 'selected' if filters.err == '1' }}>Has errors</option>
+    <option value="0" {{ 'selected' if filters.err == '0' }}>No errors</option>
+  </select>
+  <input type="hidden" name="sort" value="{{ filters.sort }}">
+  <input type="hidden" name="dir" value="{{ filters.dir }}">
+  <button class="btn" type="submit">Search</button>
+  {% if filters.q or filters.app or filters.rec or filters.err %}
+  <a class="btn secondary" href="{{ url_for('index') }}">Clear</a>
+  {% endif %}
+</form>
+
+{% macro sorth(key, label) %}
+  {% set active = filters.sort == key %}
+  {% set nd = 'asc' if (active and filters.dir == 'desc') else 'desc' %}
+  <a href="?{{ preserved }}{{ '&' if preserved }}sort={{ key }}&dir={{ nd }}">{{ label }}{% if active %} <span class="arrow">{{ '▾' if filters.dir == 'desc' else '▴' }}</span>{% endif %}</a>
+{% endmacro %}
+
+{% if rows %}
+<div class="table-wrap">
+  <table class="calls">
+    <thead>
+      <tr>
+        <th>{{ sorth('start_date', 'Date') }}</th>
+        <th>Caller</th>
+        <th>App</th>
+        <th>{{ sorth('duration', 'Duration') }}</th>
+        <th>{{ sorth('turns', 'Turns') }}</th>
+        <th>{{ sorth('latency', 'Avg latency') }}</th>
+        <th>Flags</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for r in rows %}
+      <tr onclick="location.href='{{ url_for('detail', call_id=r.call_id) }}'">
+        <td class="num">{{ (r.start_date or r.received_at) | fmt_dt }}</td>
+        <td>
+          <div class="caller">{{ r.caller_name or 'Unknown caller' }}</div>
+          <div class="num">{{ r.caller_number | truncate(42, true) }}</div>
+        </td>
+        <td class="num">{{ r.app_name }}</td>
+        <td class="metric">{{ r.duration_s | fmt_dur }}</td>
+        <td class="metric">{{ r.num_turns }}</td>
+        <td class="metric">{{ r.avg_latency_ms | fmt_ms }}</td>
+        <td class="row-badges">
+          {% if r.has_recording %}<span class="badge rec" title="Has recording">REC</span>{% endif %}
+          {% if r.has_errors %}<span class="badge warn" title="Has errors">ERR</span>{% endif %}
+          {% if r.has_barge %}<span class="badge barge" title="Barge-in">BARGE</span>{% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+<div class="empty">
+  {% if filters.q or filters.app or filters.rec or filters.err %}
+    No conversations match these filters.
+  {% else %}
+    No conversations yet. Point your AI Agent's <code>post_prompt_url</code> at <code>/collect</code>.
+  {% endif %}
+</div>
+{% endif %}
+{% endblock %}

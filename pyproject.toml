@@ -1,0 +1,74 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "post-prompt-viewer"
+version = "0.1.0"
+description = "Inspect SignalWire AI Agent conversations: transcript, telemetry, and recording-derived latency in one place."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { file = "LICENSE" }
+authors = [{ name = "SignalWire" }]
+keywords = ["signalwire", "swml", "swaig", "ai-agent", "voice", "latency", "observability"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Internet :: WWW/HTTP :: HTTP Servers",
+    "Topic :: Multimedia :: Sound/Audio :: Analysis",
+    "Framework :: FastAPI",
+]
+
+# Core viewer: ingest, store, and browse. No heavy audio stack required.
+dependencies = [
+    "fastapi>=0.110.0",
+    "uvicorn[standard]>=0.27.0",
+    "jinja2>=3.1.0",
+    "python-multipart>=0.0.9",
+    "httpx>=0.27.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/signalwire/post_prompt_viewer"
+Repository = "https://github.com/signalwire/post_prompt_viewer"
+
+[project.optional-dependencies]
+# Recording analysis pulls in latency_checker and its audio stack
+# (librosa/numpy/scipy/soundfile/pydub). The viewer degrades gracefully
+# without it: the Latency tab simply reports that the extra is not installed.
+recordings = [
+    "latency-checker @ git+https://github.com/signalwire/latency_checker.git",
+]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=3.0",
+    "black>=22.0",
+    "flake8>=5.0",
+]
+
+[project.scripts]
+post-prompt-viewer = "post_prompt_viewer.cli:main"
+ppv = "post_prompt_viewer.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+post_prompt_viewer = [
+    "web/templates/*.html",
+    "web/static/css/*.css",
+    "web/static/js/*.js",
+    "web/static/*.svg",
+]
+
+[tool.black]
+line-length = 100
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

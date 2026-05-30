@@ -1,0 +1,372 @@
+{% extends "base.html" %}
+{% block title %}{{ rec.caller_name or rec.caller_number or rec.call_id }} · Post Prompt Viewer{% endblock %}
+
+{% set kind_class = {'assistant':'ai','assistant-manual':'ai','user':'human','tool':'tool','tool-call':'tool-call','assistant-thinking':'thinking','system-log':'event','event':'event','system':'system'} %}
+{% set tier_label = {'latency':'TTFT','utterance_latency':'utterance','audio_latency':'audio','acoustic_latency':'acoustic','function_latency':'function','execution_latency':'execution'} %}
+
+{# ---- per-turn metadata chips ---- #}
+{% macro chips_for(t) %}
+  <div class="chips">
+  {% if t.kind in ['assistant','assistant-manual'] %}
+    {% for tier in ['latency','utterance_latency','audio_latency','acoustic_latency'] %}
+      {% if t.latency and t.latency.get(tier) is not none %}<span class="chip">{{ tier_label[tier] }} <b>{{ t.latency[tier] }}ms</b></span>{% endif %}
+    {% endfor %}
+    {% if t.perf %}
+      {% if t.perf.tps %}<span class="chip">tps <b>{{ '%.0f'|format(t.perf.tps) }}</b></span>{% endif %}
+      {% if t.perf.answer_time is not none %}<span class="chip">answer <b>{{ '%.2f'|format(t.perf.answer_time) }}s</b></span>{% endif %}
+      {% if t.perf.tokens %}<span class="chip">tokens <b>{{ t.perf.tokens }}</b></span>{% endif %}
+    {% endif %}
+    {% if t.barge %}<span class="chip accent">barged @ {{ t.barge.elapsed_ms }}ms</span>{% endif %}
+  {% elif t.kind == 'user' %}
+    {% if t.confidence is defined and t.confidence is not none %}<span class="chip">confidence <b>{{ '%.0f'|format(t.confidence) }}%</b></span>{% endif %}
+    {% for k, v in t.meta.items() %}<span class="chip">{{ k }} <b>{{ v }}</b></span>{% endfor %}
+  {% elif t.kind == 'tool' %}
+    {% for k, v in (t.latency or {}).items() %}<span class="chip">{{ tier_label.get(k, k) }} <b>{{ v }}ms</b></span>{% endfor %}
+  {% endif %}
+  </div>
+{% endmacro %}
+
+{# ---- a single transcript turn ---- #}
+{% macro render_turn(t) %}
+  {% set cls = kind_class.get(t.kind, 'system') %}
+  {% set seekable = t.seek is not none and t.kind in ['assistant', 'assistant-manual', 'user'] %}
+  <div class="turn {{ cls }}{{ ' seekable' if seekable }}"{% if seekable %} data-turn="{{ t.idx }}" data-seek="{{ t.seek }}"{% endif %}>
+    <div class="turn-head">
+      <span class="role">
+        {%- if t.kind == 'tool' -%}tool · {{ t.function_name or '?' }}
+        {%- elif t.kind == 'tool-call' -%}function call
+        {%- elif t.kind == 'event' -%}{{ t.label }}
+        {%- elif t.kind == 'assistant-thinking' -%}thinking
+        {%- else -%}{{ t.role }}{%- endif -%}
+      </span>
+      {% if t.ts_str %}<span class="time">{{ t.ts_str }}{% if t.elapsed %} · +{{ t.elapsed }}{% endif %}</span>{% endif %}
+    </div>
+    {% if t.kind == 'tool-call' %}
+      <div class="content">{% for c in t.tool_calls %}→ {{ c.name }}({{ c.arguments | tojson }}){% if not loop.last %}<br>{% endif %}{% endfor %}</div>
+    {% elif t.kind in ['system-log', 'event'] %}
+      {% if t.content %}<div class="content">{{ t.content }}</div>{% endif %}
+      {% if t.metadata %}<div class="chips">{% for k, v in t.metadata.items() %}<span class="chip">{{ k }} <b>{{ v }}</b></span>{% endfor %}</div>{% endif %}
+    {% elif t.collapsible %}
+      <details class="collapsible"><summary>{{ t.role }} · {{ (t.content or '')|length }} chars</summary><div class="content" style="margin-top:8px">{{ t.content }}</div></details>
+    {% else %}
+      <div class="content">{{ t.content }}</div>
+      {{ chips_for(t) }}
+    {% endif %}
+  </div>
+{% endmacro %}
+
+{% block content %}
+<div class="detail-head">
+  <a class="back" href="{{ url_for('index') }}">← all conversations</a>
+  <div class="detail-title">
+    <h1>{{ rec.caller_name or rec.caller_number or 'Conversation' }}</h1>
+    {% if rec.has_recording %}<span class="badge rec">REC</span>{% endif %}
+    {% if rec.has_errors %}<span class="badge warn">ERR</span>{% endif %}
+    {% if rec.has_barge %}<span class="badge barge">BARGE</span>{% endif %}
+  </div>
+  <div class="detail-sub">{{ rec.app_name }} · {{ (rec.start_date or rec.received_at) | fmt_dt('%Y-%m-%d %H:%M:%S UTC') }} · {{ rec.call_id }}</div>
+</div>
+
+<div class="kpis">
+  <div class="kpi"><div class="label">Duration</div><div class="value">{{ rec.duration_s | fmt_dur }}</div></div>
+  <div class="kpi"><div class="label">Turns</div><div class="value">{{ rec.num_turns }} <small>{{ rec.num_user_turns }}u / {{ rec.num_assistant_turns }}a</small></div></div>
+  <div class="kpi hl"><div class="label">Avg latency</div><div class="value">{{ rec.avg_latency_ms | fmt_ms }}</div></div>
+  <div class="kpi"><div class="label">Tokens</div><div class="value">{{ totals.input_tokens | fmt_num }}<small> in</small> / {{ totals.output_tokens | fmt_num }}<small> out</small></div></div>
+  <div class="kpi"><div class="label">Functions</div><div class="value">{{ functions | length }}</div></div>
+  {% if totals.est_ai_cost_usd is not none %}<div class="kpi"><div class="label">Est. cost</div><div class="value">${{ '%.2f'|format(totals.est_ai_cost_usd) }}</div></div>{% endif %}
+</div>
+
+{% if recording.status == 'done' and recording.audio_path and audio_present %}
+<div class="player" id="player">
+  <button class="player-btn" id="pp" title="Play / Pause (space)" aria-label="Play">&#9654;</button>
+  <button class="player-btn ghost" id="prev-turn" title="Previous turn" aria-label="Previous turn">&#9198;</button>
+  <button class="player-btn ghost" id="next-turn" title="Next turn" aria-label="Next turn">&#9199;</button>
+  <span class="player-time" id="player-time">0:00</span>
+  <span class="player-now" id="player-now">Click any turn to hear it</span>
+  <audio id="ppv-audio" preload="metadata" src="{{ url_for('recording_audio', call_id=rec.call_id) }}"></audio>
+  <script id="seek-index" type="application/json">{{ seek_index | tojson }}</script>
+</div>
+{% endif %}
+
+<nav class="tabs" role="tablist">
+  <button class="tab" data-tab="overview" role="tab" aria-selected="true">Overview</button>
+  <button class="tab" data-tab="conversation" role="tab">Conversation <span class="tab-count">{{ rec.num_turns }}</span></button>
+  <button class="tab" data-tab="timeline" role="tab">Timeline <span class="tab-count">{{ timeline | length }}</span></button>
+  <button class="tab" data-tab="latency" role="tab">Latency <span class="tab-count">{{ latency.points | length }}</span></button>
+  <button class="tab" data-tab="functions" role="tab">Functions <span class="tab-count">{{ functions | length }}</span></button>
+  <button class="tab" data-tab="telemetry" role="tab">Telemetry</button>
+  <button class="tab" data-tab="raw" role="tab">Raw</button>
+</nav>
+
+{# ===================== OVERVIEW ===================== #}
+<section class="tab-panel active" id="panel-overview" role="tabpanel">
+  {% if rec.has_recording %}
+  <div class="card" data-status-url="{{ url_for('recording_status', call_id=rec.call_id) }}" data-rec-initial="{{ recording.status }}">
+    <div class="page-head" style="margin:0 0 8px">
+      <h3 style="margin:0">Recording</h3>
+      <span class="status-pill {{ recording.status }}" data-rec-status><span class="dot"></span>{{ recording.status }}</span>
+    </div>
+    {% if recording.status == 'done' and audio_present %}
+      <p class="note">Use the player at the top of the page to listen (or click any turn). The waveform and recording-measured latency are on the <a href="#latency">Latency</a> tab.</p>
+    {% elif recording.status == 'done' %}
+      <p class="note">The cached audio was cleared.</p>
+      <button class="btn" data-analyze-url="{{ url_for('trigger_analysis', call_id=rec.call_id) }}">Re-fetch &amp; analyze</button>
+    {% elif recording.status in ['pending', 'downloading', 'analyzing'] %}
+      <p class="note">Analyzing the recording. This page updates automatically when it finishes.</p>
+    {% elif recording.status == 'failed' %}
+      <p class="note">Analysis failed: {{ recording.error }}</p>
+      <button class="btn secondary" data-analyze-url="{{ url_for('trigger_analysis', call_id=rec.call_id) }}">Retry analysis</button>
+    {% else %}
+      <button class="btn" data-analyze-url="{{ url_for('trigger_analysis', call_id=rec.call_id) }}">Analyze recording</button>
+    {% endif %}
+  </div>
+  {% endif %}
+
+  {% if summary.raw %}
+  <div class="card">
+    <span class="eyebrow">AI post-call summary</span>
+    <p style="margin:8px 0 0; color:var(--fg-secondary)">{{ summary.raw }}</p>
+  </div>
+  {% endif %}
+
+  <div class="card">
+    <h3>Call</h3>
+    <dl class="kv">
+      <dt>Caller</dt><dd>{{ rec.caller_name or '—' }}</dd>
+      <dt>Number</dt><dd>{{ rec.caller_number or '—' }}</dd>
+      <dt>App</dt><dd>{{ rec.app_name or '—' }}</dd>
+      <dt>Type</dt><dd>{{ rec.conversation_type or '—' }}</dd>
+      <dt>Started</dt><dd>{{ rec.start_date | fmt_dt('%Y-%m-%d %H:%M:%S UTC') }}</dd>
+      <dt>Duration</dt><dd>{{ rec.duration_s | fmt_dur }}</dd>
+    </dl>
+  </div>
+</section>
+
+{# ===================== CONVERSATION ===================== #}
+<section class="tab-panel" id="panel-conversation" role="tabpanel">
+  {% if has_raw_log %}
+  <div class="lat-legend" style="margin-bottom:14px">
+    <span>Log view:</span>
+    <a href="{{ url_for('detail', call_id=rec.call_id) }}?src=blessed#conversation" {% if src != 'raw' %}style="color:var(--sw-fuchsia)"{% endif %}>blessed</a>
+    <a href="{{ url_for('detail', call_id=rec.call_id) }}?src=raw#conversation" {% if src == 'raw' %}style="color:var(--sw-fuchsia)"{% endif %}>raw ({{ payload.raw_call_log | length }})</a>
+  </div>
+  {% endif %}
+  <div class="transcript">
+    {% for t in transcript %}{{ render_turn(t) }}{% endfor %}
+  </div>
+</section>
+
+{# ===================== TIMELINE ===================== #}
+<section class="tab-panel" id="panel-timeline" role="tabpanel">
+  {% if timeline %}
+  <div class="page-head" style="margin-bottom:12px">
+    <span class="note">{{ timeline | length }} events</span>
+    <button class="btn secondary" id="tl-toggle-all" data-open="0">Expand all</button>
+  </div>
+  <div class="timeline">
+    {% for e in timeline %}
+    <div class="tl-event kind-{{ e.type }}">
+      {% if e.details %}
+      <details class="tl-event-body">
+        <summary>
+          <span class="tl-label">{{ e.label }}</span>
+          {% if e.elapsed %}<span class="tl-elapsed">+{{ e.elapsed }}</span>{% endif %}
+          {% if e.ts_str %}<span class="tl-time">{{ e.ts_str }}</span>{% endif %}
+          <span class="tl-count">{{ e.details | length }} field{{ 's' if e.details | length != 1 }}</span>
+        </summary>
+        <div class="tl-details">
+          {% if 'original' in e.details and 'result' in e.details %}
+          <div class="tl-rewrite"><span class="from">{{ e.details.original | string | truncate(90, true) }}</span> &rarr; <span class="to">{{ e.details.result | string | truncate(90, true) }}</span></div>
+          {% endif %}
+          {% for k, v in e.details.items() %}{% if k not in ['original', 'result'] %}<span class="chip">{{ k }} <b>{{ v | string | truncate(40, true) }}</b></span>{% endif %}{% endfor %}
+        </div>
+      </details>
+      {% else %}
+      <div class="tl-head tl-static">
+        <span class="tl-label">{{ e.label }}</span>
+        {% if e.elapsed %}<span class="tl-elapsed">+{{ e.elapsed }}</span>{% endif %}
+        {% if e.ts_str %}<span class="tl-time">{{ e.ts_str }}</span>{% endif %}
+      </div>
+      {% endif %}
+    </div>
+    {% endfor %}
+  </div>
+  {% else %}<p class="note">No timeline events.</p>{% endif %}
+</section>
+
+{# ===================== LATENCY ===================== #}
+<section class="tab-panel" id="panel-latency" role="tabpanel">
+  {% if latency.points %}
+  {% if breakdown_stats %}
+  <div class="stat-grid" style="margin-bottom:18px">
+    <div class="stat hl"><div class="label">Avg turn latency · user&rarr;heard</div><div class="value">{{ breakdown_stats.avg | fmt_ms }}</div></div>
+    <div class="stat"><div class="label">Median</div><div class="value">{{ breakdown_stats.median | fmt_ms }}</div></div>
+    <div class="stat"><div class="label">p95</div><div class="value">{{ breakdown_stats.p95 | fmt_ms }}</div></div>
+    <div class="stat"><div class="label">Slowest turn</div><div class="value">{{ breakdown_stats.max | fmt_ms }}</div></div>
+  </div>
+  {% endif %}
+
+  <div class="card" id="latency-server">
+    <span class="eyebrow">Per-turn latency pipeline · anchored at user-stopped-talking</span>
+    <div class="lat-legend" style="margin:10px 0 14px">
+      <span><span class="sw seg-turn_detection"></span>turn detection</span>
+      <span><span class="sw seg-poll"></span>ASR poll</span>
+      <span><span class="sw seg-ttft"></span>model TTFT</span>
+      <span><span class="sw seg-model_utt"></span>model&rarr;utterance</span>
+      <span><span class="sw seg-utt_audio"></span>utterance&rarr;audio</span>
+      <span><span class="sw" style="background:var(--sw-gold)"></span>wav-measured</span>
+    </div>
+    {% for r in breakdown %}
+    <div class="sbar-row{{ ' seekable' if r.seek is not none }}"{% if r.seek is not none %} data-turn="{{ r.idx }}" data-seek="{{ r.seek }}"{% endif %}>
+      <div class="sbar-line">
+        <div class="sbar">
+          {% for s in r.segments %}<div class="sbar-seg seg-{{ s.key }}" style="width:{{ (s.ms / breakdown_scale * 100) | round(2) }}%" title="{{ s.label }}: {{ s.ms }} ms"></div>{% endfor %}
+          {% if wavmap.get(r.text) %}<div class="sbar-wav" style="left:{{ (wavmap[r.text] / breakdown_scale * 100) | round(2) }}%" title="recording-measured: {{ wavmap[r.text] }} ms"></div>{% endif %}
+        </div>
+        <div class="sbar-value" title="user stopped talking → AI heard">{{ r.total }}<span class="u">ms</span></div>
+      </div>
+      <div class="sbar-meta">
+        {% if not r.acoustic %}<span class="note">({{ 'eos+audio · derived' if r.derived_eos else ('eos+audio' if r.eos else 'audio only') }})</span>{% endif %}
+        {% if wavmap.get(r.text) %}<span class="note">wav {{ wavmap[r.text] }} ms</span>{% endif %}
+        <span class="lat-text">{{ r.text }}</span>
+      </div>
+    </div>
+    {% endfor %}
+    <p class="note" style="margin-top:12px">The number on the right is the <b>turn latency</b> — user stopped talking &rarr; AI heard. It equals <b>acoustic_latency</b> when measured, otherwise <b>eos_to_push + audio_latency</b> (turn-detection derived from the raw word-end timestamps where present). Segments sum to it; the gold tick is the recording-measured value.</p>
+  </div>
+
+  {# Recording-measured cross-validation. #}
+  <div id="latency-wav"
+       data-status-url="{{ url_for('recording_status', call_id=rec.call_id) }}"
+       data-rec-initial="{{ recording.status }}">
+    {% if not rec.has_recording %}
+      <p class="note">No recording on this call, so there is nothing to cross-check the server numbers against.</p>
+    {% elif recording.status != 'done' or not analysis %}
+      <p class="note">Recording-measured latencies will appear here once analysis finishes
+        (<span data-rec-status class="status-pill {{ recording.status }}"><span class="dot"></span>{{ recording.status }}</span>).</p>
+    {% else %}
+      {% if alignment.aggregate.wav_count %}
+      <div class="card">
+        <span class="eyebrow">Server-reported vs recording-measured</span>
+        <div class="table-wrap" style="margin-top:10px">
+          <table class="calls">
+            <thead><tr><th>Metric</th><th>Server · audio</th><th>Server · acoustic</th><th>Recording · H→AI</th></tr></thead>
+            <tbody>
+              <tr><td>Average</td><td class="metric">{{ alignment.aggregate.server_audio_avg | fmt_ms }}</td><td class="metric">{{ (alignment.aggregate.server_acoustic_avg | fmt_ms) or '—' }}</td><td class="metric" style="color:var(--sw-gold)">{{ alignment.aggregate.wav_avg | fmt_ms }}</td></tr>
+              <tr><td>Median</td><td class="metric">{{ alignment.aggregate.server_audio_median | fmt_ms }}</td><td class="metric">—</td><td class="metric" style="color:var(--sw-gold)">{{ alignment.aggregate.wav_median | fmt_ms }}</td></tr>
+              <tr><td>p95</td><td class="metric">{{ alignment.aggregate.server_audio_p95 | fmt_ms }}</td><td class="metric">—</td><td class="metric" style="color:var(--sw-gold)">{{ alignment.aggregate.wav_p95 | fmt_ms }}</td></tr>
+              <tr><td>Count</td><td class="metric">{{ latency.points | length }}</td><td class="metric">—</td><td class="metric">{{ alignment.aggregate.wav_count }}</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="note" style="margin-top:10px"><b>acoustic</b> is the server field intended to match a wav analyzer; when present it is the fairest comparison to the recording-measured number.</p>
+      </div>
+      {% else %}
+      <div class="card">
+        <span class="eyebrow">Recording analyzed — no clean latencies extracted</span>
+        <p class="note" style="margin-top:8px">The turn detector found {{ analysis.ai_segments | length }} AI and {{ analysis.human_segments | length }} human speech segments but no clean Human&rarr;AI response latencies. This call is tool-heavy (search + filler audio) with overlapping turns, so the detected "AI start" is filler audio rather than the spoken response. The waveform and segments are below; tune <code>PPV_MIN_SILENCE_MS</code> for recordings with cleaner turn-taking.</p>
+      </div>
+      {% endif %}
+
+      {% if alignment.pairs %}
+      <div class="card">
+        <span class="eyebrow">Per-turn · {{ alignment.matched }} of {{ alignment.wav_count }} matched by time</span>
+        <div style="margin-top:8px">
+          {% for p in alignment.pairs %}
+          <div class="lat-row">
+            <div class="lat-text">{{ p.text }}</div>
+            <div class="chips">
+              {% if p.audio_latency is not none %}<span class="chip">audio <b>{{ p.audio_latency }}ms</b></span>{% endif %}
+              {% if p.acoustic_latency is not none %}<span class="chip">acoustic <b>{{ p.acoustic_latency }}ms</b></span>{% endif %}
+              <span class="chip" style="color:var(--sw-gold);border-color:rgba(255,215,0,0.35)">wav <b>{{ p.wav_ms }}ms</b></span>
+              {% if p.delta_ms is not none %}<span class="chip {{ 'accent' if (p.delta_ms | abs) > 150 else '' }}">Δ <b>{{ p.delta_ms }}ms</b></span>{% endif %}
+            </div>
+          </div>
+          {% endfor %}
+        </div>
+      </div>
+      {% endif %}
+
+      <div class="card">
+        <div class="lat-legend">
+          <span><span class="sw" style="background:rgba(247,42,114,0.6)"></span>AI speech</span>
+          <span><span class="sw" style="background:rgba(4,78,244,0.6)"></span>Human speech</span>
+          <span class="note">{{ ((analysis.file_info or {}).get('duration') or 0) | round(1) }}s · {{ (analysis.channel_assignment or {}).get('left', '?') }}=L / {{ (analysis.channel_assignment or {}).get('right', '?') }}=R</span>
+        </div>
+        <div id="waveform" style="margin-top:10px"></div>
+      </div>
+      <script id="analysis-data" type="application/json">{{ {'ai_segments': analysis.ai_segments, 'human_segments': analysis.human_segments, 'latencies': analysis.latencies} | tojson }}</script>
+    {% endif %}
+  </div>
+  {% else %}
+  <p class="note">No per-turn latency was reported for this call.</p>
+  {% endif %}
+</section>
+
+{# ===================== FUNCTIONS ===================== #}
+<section class="tab-panel" id="panel-functions" role="tabpanel">
+  {% if functions %}
+    {% for f in functions %}
+    <div class="card">
+      <div class="page-head" style="margin:0 0 10px">
+        <h3 style="margin:0">{{ f.name }}</h3>
+        <div class="chips">
+          {% for k, v in (f.latency or {}).items() %}<span class="chip">{{ tier_label.get(k, k) }} <b>{{ v }}ms</b></span>{% endfor %}
+          {% if f.ts_str %}<span class="chip">{{ f.ts_str }}</span>{% endif %}
+        </div>
+      </div>
+      <span class="eyebrow">Arguments</span>
+      <pre class="code" style="margin:6px 0 12px">{{ f.args | pretty }}</pre>
+      {% if f.result %}
+      <details class="code-collapse"><summary>Result &middot; {{ f.result | string | length }} chars</summary><pre class="code">{{ f.result }}</pre></details>
+      {% endif %}
+      {% if f.post_response %}
+      <details class="code-collapse"><summary>post_response</summary><pre class="code">{{ f.post_response | pretty }}</pre></details>
+      {% endif %}
+    </div>
+    {% endfor %}
+  {% else %}<p class="note">No SWAIG function calls on this call.</p>{% endif %}
+</section>
+
+{# ===================== TELEMETRY ===================== #}
+<section class="tab-panel" id="panel-telemetry" role="tabpanel">
+  <div class="card">
+    <h3>Usage</h3>
+    <div class="stat-grid">
+      <div class="stat"><div class="label">Total minutes</div><div class="value">{{ totals.total_minutes | fmt_num }}</div></div>
+      <div class="stat"><div class="label">Wire tokens in</div><div class="value">{{ totals.wire_input_tokens | fmt_num }} <span class="per">/ {{ totals.wire_input_tpm | fmt_num }} pm</span></div></div>
+      <div class="stat"><div class="label">Wire tokens out</div><div class="value">{{ totals.wire_output_tokens | fmt_num }} <span class="per">/ {{ totals.wire_output_tpm | fmt_num }} pm</span></div></div>
+      <div class="stat"><div class="label">TTS chars</div><div class="value">{{ totals.tts_chars | fmt_num }} <span class="per">/ {{ totals.tts_chars_per_min | fmt_num }} pm</span></div></div>
+      <div class="stat"><div class="label">ASR minutes</div><div class="value">{{ (totals.asr_minutes or 0) | round(2) }} <span class="per">× {{ (totals.asr_cost_factor or 0) | round(2) }}</span></div></div>
+      <div class="stat"><div class="label">AI duration</div><div class="value">{{ totals.ai_duration_s | fmt_dur }}</div></div>
+    </div>
+  </div>
+  {% if global_data %}
+  <div class="card">
+    <h3>global_data</h3>
+    <pre class="code">{{ global_data | pretty }}</pre>
+  </div>
+  {% endif %}
+</section>
+
+{# ===================== RAW ===================== #}
+<section class="tab-panel" id="panel-raw" role="tabpanel">
+  <div class="card">
+    <span class="eyebrow">Stored payload</span>
+    <p class="note" style="margin:8px 0 14px">{{ payload | length }} top-level keys. The full JSON is large, so it isn't rendered inline &mdash; open or download it instead.</p>
+    <a class="btn" href="{{ url_for('call_payload', call_id=rec.call_id) }}" target="_blank" rel="noopener">View JSON</a>
+    <a class="btn secondary" href="{{ url_for('call_payload', call_id=rec.call_id) }}" download="{{ rec.call_id }}.json" style="margin-left:8px">Download</a>
+  </div>
+</section>
+{% endblock %}
+
+{% block scripts %}
+{% if recording.status == 'done' and recording.audio_path %}
+<script src="{{ url_for('static', path='/js/player.js') }}"></script>
+{% endif %}
+{% if recording.status == 'done' and analysis %}
+<script src="https://unpkg.com/wavesurfer.js@7"></script>
+<script src="https://unpkg.com/wavesurfer.js@7/dist/plugins/regions.min.js"></script>
+<script src="{{ url_for('static', path='/js/latency.js') }}"></script>
+{% endif %}
+{% endblock %}
