@@ -23,7 +23,7 @@
     {% if t.eot %}<span class="chip{{ ' warn' if (t.eot.confidence is not none and t.eot.confidence < 60) else '' }}" title="end-of-turn basis and confidence">eot {{ t.eot.basis }}{% if t.eot.confidence is not none %} <b>{{ '%.0f'|format(t.eot.confidence) }}%</b>{% endif %}</span>{% endif %}
     {% if t.asr %}
       {% if t.asr.speaking_to_final_event is not none %}<span class="chip" title="user began speaking → final transcript event">speak&rarr;final <b>{{ t.asr.speaking_to_final_event }}ms</b></span>{% endif %}
-      {% if t.asr.commit_latency_ms is not none %}<span class="chip" title="ASR commit latency">ASR <b>{{ t.asr.commit_latency_ms }}ms</b></span>{% endif %}
+      {% if t.asr.commit_latency_ms is not none %}<span class="chip" title="last word → commit (end-of-turn detection)">commit <b>{{ t.asr.commit_latency_ms }}ms</b></span>{% endif %}
       {% if t.asr.segments is not none %}<span class="chip" title="ASR speech segments">{{ t.asr.segments }} seg</span>{% endif %}
     {% endif %}
     {% for k, v in t.meta.items() %}<span class="chip">{{ k }} <b>{{ v }}</b></span>{% endfor %}
@@ -215,18 +215,19 @@
 <section class="tab-panel" id="panel-latency" role="tabpanel">
   {% if latency.points %}
   {% if breakdown_stats %}
-  <div class="stat-grid" style="margin-bottom:18px">
-    <div class="stat hl"><div class="label">Avg turn latency · user&rarr;heard</div><div class="value">{{ breakdown_stats.avg | fmt_ms }}</div></div>
+  <div class="stat-grid" style="margin-bottom:8px">
+    <div class="stat hl"><div class="label">Avg turn latency · user stopped &rarr; AI started</div><div class="value">{{ breakdown_stats.avg | fmt_ms }}</div></div>
     <div class="stat"><div class="label">Median</div><div class="value">{{ breakdown_stats.median | fmt_ms }}</div></div>
     <div class="stat"><div class="label">p95</div><div class="value">{{ breakdown_stats.p95 | fmt_ms }}</div></div>
     <div class="stat"><div class="label">Slowest turn</div><div class="value">{{ breakdown_stats.max | fmt_ms }}</div></div>
   </div>
+  <p class="note" style="margin:0 0 18px">{{ breakdown_stats.rec_count }} of {{ breakdown_stats.count }} turns measured from the recording (silence&rarr;voice); the rest are server estimates.</p>
   {% endif %}
 
   <div class="card" id="latency-server">
     <span class="eyebrow">Per-turn latency pipeline · anchored at user-stopped-talking</span>
     <div class="lat-legend" style="margin:10px 0 14px">
-      <span><span class="sw seg-turn_detection"></span>turn detection</span>
+      <span><span class="sw seg-turn_detection"></span>end-of-turn detection</span>
       <span><span class="sw seg-dispatch"></span>dispatch</span>
       <span><span class="sw seg-ttft"></span>model TTFT</span>
       <span><span class="sw seg-model_utt"></span>model&rarr;utterance</span>
@@ -240,17 +241,16 @@
           {% for s in r.segments %}<div class="sbar-seg seg-{{ s.key }}" style="width:{{ (s.ms / breakdown_scale * 100) | round(2) }}%" title="{{ s.label }}: {{ s.ms }} ms"></div>{% endfor %}
           {% if wavmap.get(r.text) %}<div class="sbar-wav" style="left:{{ (wavmap[r.text] / breakdown_scale * 100) | round(2) }}%" title="recording-measured: {{ wavmap[r.text] }} ms"></div>{% endif %}
         </div>
-        <div class="sbar-value" title="user stopped talking → AI heard">{{ r.total }}<span class="u">ms</span></div>
+        <div class="sbar-value" title="user stopped talking → AI started{{ ' · recording-measured' if r.caliper else ' · server estimate' }}">{{ r.caliper or r.total }}<span class="u">ms</span></div>
       </div>
       <div class="sbar-meta">
-        {% if not r.acoustic %}<span class="note">({{ 'eos+audio · derived' if r.derived_eos else ('eos+audio' if r.eos else 'audio only') }})</span>{% endif %}
-        {% if r.td_source == 'asr' %}<span class="note" title="turn detection from the user turn's ASR commit latency">turn-detect {{ r.td }}ms · ASR{% if r.speak_to_final %} · speak&rarr;final {{ r.speak_to_final }}ms{% endif %}</span>{% endif %}
-        {% if wavmap.get(r.text) %}<span class="note">wav {{ wavmap[r.text] }} ms</span>{% endif %}
+        {% if r.caliper %}<span class="note">recording · server est {{ r.total }}ms</span>{% else %}<span class="note">server est{% if not r.acoustic %} · {{ 'eos+audio derived' if r.derived_eos else ('eos+audio' if r.eos else 'audio only') }}{% endif %}</span>{% endif %}
+        {% if r.td_source == 'asr' %}<span class="note{{ ' warn' if (r.eot and (r.eot.basis == 'ceiling' or (r.eot.confidence is not none and r.eot.confidence < 50))) else '' }}" title="end-of-turn detection — last word → commit (commit_latency_ms)">EOT {{ r.td }}ms{% if r.eot and r.eot.basis %} · {{ r.eot.basis }}{% if r.eot.confidence is not none %} {{ '%.0f'|format(r.eot.confidence) }}%{% endif %}{% endif %}</span>{% endif %}
         <span class="lat-text">{{ r.text }}</span>
       </div>
     </div>
     {% endfor %}
-    <p class="note" style="margin-top:12px">The number on the right is the <b>turn latency</b> — user stopped talking &rarr; AI heard. Segments sum to it: <b>turn detection</b> (the user turn's real ASR endpoint hold when present, else derived from raw word-end timestamps) + <b>dispatch</b> (gather/validation before the model is prompted) + the model/TTS tiers. It equals <b>acoustic_latency</b> when measured, otherwise <b>eos_to_push + audio_latency</b>. The gold tick is the recording-measured value.</p>
+    <p class="note" style="margin-top:12px">The number on the right is the <b>turn latency</b> — user stopped talking &rarr; AI started — measured from the <b>recording</b>'s silence gap when one exists, else a server estimate. The bar is the telemetry's account of that gap: <b>end-of-turn detection</b> (<code>commit_latency_ms</code>, last word &rarr; commit, tagged with the <code>eot</code> basis — <i>entity_snap</i> commits fast, <i>growth_stop</i>/<i>ceiling</i> waited) + <b>dispatch</b> + the model/TTS tiers. The gold tick is the recording-measured value; bar overshoot past it is server-timing slack. The caller's talking time is not counted here.</p>
   </div>
 
   {# Recording-measured cross-validation. #}

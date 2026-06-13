@@ -555,13 +555,15 @@ def _pos(value):
 
 
 def _preceding_user_asr(call_log: list, idx: int):
-    """ASR turn-detection telemetry of the user turn that triggered AI turn ``idx``.
+    """End-of-turn telemetry of the user turn that triggered AI turn ``idx``.
 
-    Returns ``(commit_latency_ms, speaking_to_final_event)`` from the nearest
-    preceding ``user`` turn (or ``(None, None)``). ``commit_latency_ms`` (a.k.a.
-    ``hold_ms``) is the endpoint hold after the user stopped speaking — the real
-    ASR-side turn-detection delay, which the raw-timestamp ``eos`` over-states by
-    also including post-ASR dispatch.
+    Returns ``(commit_latency_ms, eot)`` from the nearest preceding ``user`` turn
+    (or ``(None, None)``). Per the mod_deepgram turn-controls spec,
+    ``commit_latency_ms`` is "last token → commit" — the real end-of-turn
+    detection latency, measured from when the user stopped (it excludes talking /
+    hold time and is more reliable than the raw-timestamp ``eos``). ``eot`` is
+    ``{"basis", "confidence"}``: *why* the turn ended (``entity_snap`` commits fast,
+    ``growth_stop`` waited the stall, ``ceiling`` was force-released at the cap).
     """
     for j in range(idx - 1, -1, -1):
         e = call_log[j]
@@ -571,9 +573,13 @@ def _preceding_user_asr(call_log: list, idx: int):
             td = timing.get("commit_latency_ms")
             if not isinstance(td, (int, float)):
                 td = timing.get("hold_ms")
-            s2f = e.get("speaking_to_final_event")
-            return (td if isinstance(td, (int, float)) else None,
-                    s2f if isinstance(s2f, (int, float)) else None)
+            raw_eot = e.get("eot")
+            eot = None
+            if isinstance(raw_eot, dict) and raw_eot.get("basis"):
+                conf = raw_eot.get("confidence")
+                eot = {"basis": raw_eot["basis"],
+                       "confidence": conf * 100 if isinstance(conf, (int, float)) else None}
+            return (td if isinstance(td, (int, float)) else None, eot)
         if role in ("assistant", "assistant-manual"):
             break
     return (None, None)
@@ -584,17 +590,17 @@ def latency_breakdown(payload: dict) -> list:
     "user stopped talking" per ENRICHED_CALL_LOG.md.
 
     Segments (ms), left to right:
-        turn detection (eos_to_push) | ASR poll | model TTFT | model->utterance |
+        end-of-turn detection | dispatch | model TTFT | model->utterance |
         utterance->audio
 
-    The three model segments always sum to ``audio_latency`` (they share the
-    ``request_detect_time`` anchor). The pre-model portion is ``total - audio``:
-    when ``eos_to_push`` is known (field or derived from the raw ``*_wall_us``
-    timestamps) it is split into turn-detection + poll; otherwise it is shown as
-    a single unattributed "turn detection" segment. ``total`` is
-    ``acoustic_latency`` when measured, else ``eos_to_push + audio_latency``.
-    Segments always sum to ``total``. Turns with no audio timing (filler /
-    manual_say / tool turns) are skipped.
+    The three model segments always sum to ``audio_latency``. The pre-model
+    portion is ``total - audio``: the "end-of-turn detection" front uses the
+    triggering user turn's ``commit_latency_ms`` (last word -> commit) when
+    present, else the raw-timestamp ``eos_to_push``; the remainder is "dispatch".
+    ``total`` is ``acoustic_latency`` when measured, else
+    ``eos_to_push + audio_latency`` (the view overlays the recording-measured
+    caliper as the headline). Segments always sum to ``total``. Turns with no
+    audio timing (filler / manual_say / tool turns) are skipped.
     """
     rows = []
     record_start = _record_start(payload)
@@ -616,10 +622,10 @@ def latency_breakdown(payload: dict) -> list:
                 eos = round((sp - lwe) / 1000)
                 derived_eos = True
 
-        # Real ASR-side turn detection: the endpoint hold of the user turn that
-        # triggered this response. Preferred over the raw-timestamp eos (which
-        # also lumps in post-ASR dispatch/gather time before the model is prompted).
-        asr_td, speak_to_final = _preceding_user_asr(call_log, idx)
+        # End-of-turn detection: the user turn's commit_latency_ms (last word →
+        # commit) — the real "how long to realize he's done". Preferred over the
+        # raw-timestamp eos, which also lumps in post-ASR dispatch.
+        asr_td, eot_info = _preceding_user_asr(call_log, idx)
         td = asr_td if asr_td is not None else eos
         td_source = "asr" if asr_td is not None else ("eos" if eos is not None else None)
 
@@ -631,12 +637,12 @@ def latency_breakdown(payload: dict) -> list:
         if front > 0:
             if td and td <= front:
                 used_td = round(td)
-                segs.append({"key": "turn_detection", "label": "turn detection", "ms": used_td})
+                segs.append({"key": "turn_detection", "label": "end-of-turn detection", "ms": used_td})
                 rem = round(front - td)
                 if rem > 0:
                     segs.append({"key": "dispatch", "label": "dispatch", "ms": rem})
             else:
-                segs.append({"key": "turn_detection", "label": "turn detection", "ms": round(front)})
+                segs.append({"key": "turn_detection", "label": "end-of-turn detection", "ms": round(front)})
                 td_source = None  # whole front unattributed
 
         if lat and utt and utt >= lat and aud >= utt:
@@ -660,7 +666,7 @@ def latency_breakdown(payload: dict) -> list:
             "derived_eos": derived_eos,
             "td": used_td,
             "td_source": td_source,
-            "speak_to_final": speak_to_final,
+            "eot": eot_info,
         })
     return rows
 

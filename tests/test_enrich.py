@@ -138,12 +138,12 @@ def test_latency_breakdown_segments_sum_to_total():
 
 
 def test_latency_breakdown_uses_asr_turn_detection():
-    # The preceding user turn's ASR commit latency becomes the real "turn
-    # detection" segment; the rest of the front is "dispatch".
+    # The preceding user turn's commit_latency_ms becomes the "end-of-turn
+    # detection" segment; the rest of the front is "dispatch"; eot carries through.
     payload = {"call_log": [
         {"role": "user", "content": "hi", "timestamp": 1,
          "timing": {"commit_latency_ms": 400, "hold_ms": 400},
-         "speaking_to_final_event": 1200},
+         "eot": {"basis": "growth_stop", "confidence": 0.8}},
         {"role": "assistant", "content": "ok", "timestamp": 2,
          "latency": 150, "utterance_latency": 500, "audio_latency": 600,
          "acoustic_latency": 1500},
@@ -151,7 +151,8 @@ def test_latency_breakdown_uses_asr_turn_detection():
     r = enrich.latency_breakdown(payload)[0]
     seg = {s["key"]: s["ms"] for s in r["segments"]}
     assert seg["turn_detection"] == 400        # = user commit_latency_ms
-    assert seg["dispatch"] == 500              # = front(900) - turn detection(400)
+    assert seg["dispatch"] == 500              # = front(900) - detection(400)
     assert r["td_source"] == "asr" and r["td"] == 400
-    assert r["speak_to_final"] == 1200
+    assert r["eot"]["basis"] == "growth_stop"
+    assert r["eot"]["confidence"] == pytest.approx(80.0)
     assert sum(s["ms"] for s in r["segments"]) == r["total"] == 1500

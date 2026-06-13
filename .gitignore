@@ -26,8 +26,9 @@ data/
 *.log
 ppv.env
 
-# Internal findings handoff (not part of the open-source repo)
+# Internal references / handoffs (not part of the open-source repo)
 FINDINGS.md
+turn_controls.md
 
 # Ad-hoc call payloads dropped in the repo root (the curated sample is in samples/)
 /conversation_*.json

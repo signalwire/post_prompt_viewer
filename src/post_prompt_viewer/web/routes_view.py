@@ -180,15 +180,19 @@ async def detail(request: Request, call_id: str, src: str = "blessed"):
     wavmap = {pr["text"]: pr["wav_ms"]
               for pr in (alignment["pairs"] if alignment else []) if pr.get("text")}
     breakdown_scale = max([r["total"] for r in breakdown] + list(wavmap.values()) + [1])
-    # "Turn latency" = user-stopped-talking -> AI heard, i.e. each bar's total.
-    _totals = sorted(r["total"] for r in breakdown)
+    # Headline turn latency = the recording-measured calipers (user stopped ->
+    # AI started). The server total is the fallback when there is no recording.
+    for r in breakdown:
+        r["caliper"] = wavmap.get(r["text"])
+    _lat = sorted((r["caliper"] if r["caliper"] is not None else r["total"]) for r in breakdown)
     breakdown_stats = {
-        "avg": round(sum(_totals) / len(_totals)),
-        "median": round(statistics.median(_totals)),
-        "p95": _totals[min(len(_totals) - 1, int(round(0.95 * (len(_totals) - 1))))],
-        "max": _totals[-1],
-        "count": len(_totals),
-    } if _totals else None
+        "avg": round(sum(_lat) / len(_lat)),
+        "median": round(statistics.median(_lat)),
+        "p95": _lat[min(len(_lat) - 1, int(round(0.95 * (len(_lat) - 1))))],
+        "max": _lat[-1],
+        "count": len(_lat),
+        "rec_count": sum(1 for r in breakdown if r["caliper"] is not None),
+    } if _lat else None
     source = "raw" if src == "raw" else "blessed"
     transcript = enrich.build_transcript(payload, source=source)
     # Sorted index of seekable spoken turns, for prev/next + current-turn highlight.
