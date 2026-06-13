@@ -113,68 +113,59 @@ def test_align_latency_synthetic():
     assert out["aggregate"]["server_acoustic_avg"] == 700
 
 
-def test_latency_breakdown_segments_sum_to_total():
-    payload = {
-        "call_log": [
-            # acoustic measured, no eos field -> unattributed turn-detection front
-            {"role": "assistant", "content": "a", "latency": 150,
-             "utterance_latency": 500, "audio_latency": 600, "acoustic_latency": 900},
-            # eos derived from raw timestamps (300 ms); no acoustic
-            {"role": "assistant", "content": "b", "latency": 100,
-             "utterance_latency": 400, "audio_latency": 700,
-             "last_word_end_wall_us": 1_000_000_000, "status_pushed_wall_us": 1_000_300_000},
-            # filler / manual_say with no audio timing -> skipped
-            {"role": "assistant-manual", "content": "filler", "audio_latency": 0,
-             "acoustic_latency": 0},
-        ]
-    }
-    rows = enrich.latency_breakdown(payload)
-    assert len(rows) == 2  # the manual filler turn is skipped
-    for r in rows:
-        assert sum(s["ms"] for s in r["segments"]) == r["total"]
-    assert rows[0]["total"] == 900  # = acoustic_latency
-    assert rows[1]["eos"] == 300 and rows[1]["derived_eos"] is True
-    assert rows[1]["total"] == 1000  # = eos + audio_latency
-
-
-def test_latency_breakdown_uses_asr_turn_detection():
-    # The preceding user turn's commit_latency_ms becomes the "end-of-turn
-    # detection" segment; the rest of the front is "dispatch"; eot carries through.
-    payload = {"call_log": [
-        {"role": "user", "content": "hi", "timestamp": 1,
-         "timing": {"commit_latency_ms": 400, "hold_ms": 400},
-         "eot": {"basis": "growth_stop", "confidence": 0.8}},
-        {"role": "assistant", "content": "ok", "timestamp": 2,
-         "latency": 150, "utterance_latency": 500, "audio_latency": 600,
-         "acoustic_latency": 1500},
-    ]}
-    r = enrich.latency_breakdown(payload)[0]
-    seg = {s["key"]: s["ms"] for s in r["segments"]}
-    assert seg["turn_detection"] == 400        # = user commit_latency_ms
-    assert seg["dispatch"] == 500              # = front(900) - detection(400)
-    assert r["td_source"] == "asr" and r["td"] == 400
-    assert r["eot"]["basis"] == "growth_stop"
-    assert r["eot"]["confidence"] == pytest.approx(80.0)
-    assert sum(s["ms"] for s in r["segments"]) == r["total"] == 1500
-
-
-def test_latency_breakdown_pairs_user_across_tool_calls():
-    # Tool-call / filler / tool-result entries sit between the user's answer and
-    # the spoken reply; detection must still use the user turn's commit_latency_ms.
+def test_build_flow_split_and_held_verdict():
+    # Latency = detection (commit) + tool (execution) + model, summing to the
+    # total; pairing reaches the user turn across the tool-call entries; the eot
+    # basis drives the plain-English verdict.
     payload = {"call_log": [
         {"role": "user", "content": "714 East Osage", "timestamp": 1,
-         "timing": {"commit_latency_ms": 5000}, "eot": {"basis": "growth_stop", "confidence": 0.9}},
-        {"role": "assistant-manual", "content": "One moment.", "timestamp": 2},
-        {"role": "assistant", "timestamp": 3,
+         "timing": {"commit_latency_ms": 5000, "segments": 3},
+         "eot": {"basis": "growth_stop", "confidence": 0.88}},
+        {"role": "assistant", "timestamp": 2,
          "tool_calls": [{"id": "1", "type": "function", "function": {"name": "validate", "arguments": "{}"}}]},
-        {"role": "tool", "content": "ok", "timestamp": 4,
-         "function_name": "validate", "execution_latency": 1200},
-        {"role": "assistant", "content": "The pickup address is set.", "timestamp": 5,
-         "latency": 500, "utterance_latency": 600, "audio_latency": 700, "acoustic_latency": 8000},
+        {"role": "tool", "content": "ok", "timestamp": 3,
+         "function_name": "validate", "execution_latency": 1500},
+        {"role": "assistant", "content": "The pickup address is set.", "timestamp": 4,
+         "latency": 500, "utterance_latency": 600, "audio_latency": 700, "acoustic_latency": 9999},
     ]}
-    r = next(x for x in enrich.latency_breakdown(payload) if x["text"].startswith("The pickup"))
-    assert r["td_source"] == "asr" and r["td"] == 5000
-    assert r["eot"]["basis"] == "growth_stop"
-    seg = {s["key"]: s["ms"] for s in r["segments"]}
-    assert seg.get("tool") == 1200 and r["tool_names"] == ["validate"]
-    assert sum(s["ms"] for s in r["segments"]) == r["total"]
+    f = enrich.build_flow(payload)[0]  # no recording -> server total = acoustic
+    assert f["det"] + f["tool"] + f["model"] == f["total"] == 9999
+    assert f["det"] == 5000 and f["tool"] == 1500 and f["total_source"] == "server"
+    assert f["verdict_kind"] == "held" and "3 parts" in f["verdict"]
+    assert f["human"]["text"] == "714 East Osage"
+
+
+def test_build_flow_entity_snap_verdict():
+    payload = {"call_log": [
+        {"role": "user", "content": "j at gmail", "timestamp": 1,
+         "timing": {"commit_latency_ms": 300},
+         "entity": {"type": "email", "valid": True, "value": "j@gmail.com"},
+         "eot": {"basis": "entity_snap", "confidence": 0.97}},
+        {"role": "assistant", "content": "Got it.", "timestamp": 2,
+         "latency": 200, "utterance_latency": 300, "audio_latency": 400, "acoustic_latency": 1200},
+    ]}
+    f = enrich.build_flow(payload)[0]
+    assert f["verdict_kind"] == "snap" and "email" in f["verdict"]
+    assert f["human"]["entity"]["value"] == "j@gmail.com"
+
+
+def test_build_waterfall_offsets_lanes_and_swaig():
+    payload = {
+        "call_log": [{"role": "assistant", "content": "hi", "timestamp": 2_000_000}],
+        "call_timeline": [
+            {"ts": 1_000_000, "type": "session_start", "step": "greet"},
+            {"ts": 3_000_000, "type": "user_input", "start_timestamp": 1_500_000,
+             "end_timestamp": 3_000_000, "confidence": 95.0},
+            {"ts": 5_000_000, "type": "function_call", "function": "lookup", "duration_ms": 250},
+        ],
+        "swaig_log": [{"command_name": "lookup", "command_arg": "{\"q\": 1}",
+                       "post_response": {"response": "ok"}}],
+    }
+    wf = enrich.build_waterfall(payload)
+    assert wf["span"] == 4000  # (5_000_000 - 1_000_000) / 1000
+    evs = {e["type"]: e for e in wf["events"]}
+    assert evs["session_start"]["off"] == 0
+    assert evs["user_input"]["lane"] == "human" and evs["user_input"]["dur"] == 1500
+    assert evs["function_call"]["lane"] == "tool"
+    assert evs["function_call"]["swaig"]["name"] == "lookup"
+    assert [e["off"] for e in wf["events"]] == sorted(e["off"] for e in wf["events"])

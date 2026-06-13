@@ -176,26 +176,19 @@ async def detail(request: Request, call_id: str, src: str = "blessed"):
             pass
     analysis = recording.get("analysis") if recording.get("status") == "done" else None
     alignment = enrich.align_latency(payload, analysis) if analysis else None
-    breakdown = enrich.latency_breakdown(payload)
-    wavmap = {pr["text"]: pr["wav_ms"]
-              for pr in (alignment["pairs"] if alignment else []) if pr.get("text")}
-    breakdown_scale = max([r["total"] for r in breakdown] + list(wavmap.values()) + [1])
-    # Headline turn latency = the recording-measured calipers (user stopped ->
-    # AI started). The server total is the fallback when there is no recording.
-    for r in breakdown:
-        r["caliper"] = wavmap.get(r["text"])
-    _lat = sorted((r["caliper"] if r["caliper"] is not None else r["total"]) for r in breakdown)
+    flow = enrich.build_flow(payload, analysis)
+    flow_scale = max([f["total"] for f in flow] + [1])
+    waterfall = enrich.build_waterfall(payload)
+    # Turn-latency summary, off the flow totals (recording truth where matched).
+    _lat = sorted(f["total"] for f in flow)
     breakdown_stats = {
         "avg": round(sum(_lat) / len(_lat)),
         "median": round(statistics.median(_lat)),
         "p95": _lat[min(len(_lat) - 1, int(round(0.95 * (len(_lat) - 1))))],
         "max": _lat[-1],
         "count": len(_lat),
-        "rec_count": sum(1 for r in breakdown if r["caliper"] is not None),
+        "rec_count": sum(1 for f in flow if f["total_source"] == "recording"),
     } if _lat else None
-    flow = enrich.build_flow(payload, analysis)
-    flow_scale = max([f["total"] for f in flow] + [1])
-    waterfall = enrich.build_waterfall(payload)
     source = "raw" if src == "raw" else "blessed"
     transcript = enrich.build_transcript(payload, source=source)
     # Sorted index of seekable spoken turns, for prev/next + current-turn highlight.
@@ -228,9 +221,6 @@ async def detail(request: Request, call_id: str, src: str = "blessed"):
             "audio_present": audio_present,
             "analysis": analysis,
             "alignment": alignment,
-            "breakdown": breakdown,
-            "wavmap": wavmap,
-            "breakdown_scale": breakdown_scale,
             "breakdown_stats": breakdown_stats,
             "flow": flow,
             "flow_scale": flow_scale,

@@ -87,19 +87,6 @@
     });
   });
 
-  // ---- Timeline: expand / collapse all events ----
-  var tlAll = document.getElementById("tl-toggle-all");
-  if (tlAll) {
-    tlAll.addEventListener("click", function () {
-      var open = tlAll.dataset.open !== "1";
-      Array.prototype.slice.call(document.querySelectorAll(".tl-event-body")).forEach(function (d) {
-        d.open = open;
-      });
-      tlAll.dataset.open = open ? "1" : "0";
-      tlAll.textContent = open ? "Collapse all" : "Expand all";
-    });
-  }
-
   // ---- Index: upload a saved post_prompt JSON (same ingest path as /collect) ----
   var upBtn = document.getElementById("upload-btn");
   var upInput = document.getElementById("upload-input");

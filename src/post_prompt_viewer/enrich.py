@@ -554,47 +554,12 @@ def _pos(value):
     return value if isinstance(value, (int, float)) and value > 0 else None
 
 
-def _preceding_user_asr(call_log: list, idx: int):
-    """End-of-turn telemetry of the user turn that triggered AI turn ``idx``.
-
-    Returns ``(commit_latency_ms, eot)`` from the nearest preceding ``user`` turn
-    (or ``(None, None)``). Per the mod_deepgram turn-controls spec,
-    ``commit_latency_ms`` is "last token → commit" — the real end-of-turn
-    detection latency, measured from when the user stopped (it excludes talking /
-    hold time and is more reliable than the raw-timestamp ``eos``). ``eot`` is
-    ``{"basis", "confidence"}``: *why* the turn ended (``entity_snap`` commits fast,
-    ``growth_stop`` waited the stall, ``ceiling`` was force-released at the cap).
-    """
-    for j in range(idx - 1, -1, -1):
-        e = call_log[j]
-        role = e.get("role")
-        if role == "user":
-            timing = e.get("timing") or {}
-            td = timing.get("commit_latency_ms")
-            if not isinstance(td, (int, float)):
-                td = timing.get("hold_ms")
-            raw_eot = e.get("eot")
-            eot = None
-            if isinstance(raw_eot, dict) and raw_eot.get("basis"):
-                conf = raw_eot.get("confidence")
-                eot = {"basis": raw_eot["basis"],
-                       "confidence": conf * 100 if isinstance(conf, (int, float)) else None}
-            return (td if isinstance(td, (int, float)) else None, eot)
-        # Stop only at a previous *spoken* AI turn (crossing into the prior
-        # exchange). Tool-calls, fillers (assistant-manual), thinking and tool
-        # results sit between the user's answer and the reply in a tool-using
-        # flow — scan past them to reach the user turn that triggered this turn.
-        if role == "assistant" and e.get("content"):
-            break
-    return (None, None)
-
-
 def _preceding_tools(call_log: list, idx: int):
     """SWAIG tool calls that ran for AI turn ``idx``.
 
     Returns ``(total_execution_ms, [function_names])`` from the ``tool`` result
     entries between this spoken turn and the user turn that triggered it (same
-    boundary as :func:`_preceding_user_asr`).
+    boundary as :func:`_preceding_user_entry`).
     """
     total_ms = 0
     names = []
@@ -615,107 +580,6 @@ def _preceding_tools(call_log: list, idx: int):
             break
     names.reverse()
     return (round(total_ms), names)
-
-
-def latency_breakdown(payload: dict) -> list:
-    """Per-AI-turn pipeline decomposition for a stacked bar, anchored at
-    "user stopped talking" per ENRICHED_CALL_LOG.md.
-
-    Segments (ms), left to right:
-        end-of-turn detection | dispatch | model TTFT | model->utterance |
-        utterance->audio
-
-    The three model segments always sum to ``audio_latency``. The pre-model
-    portion is ``total - audio``: the "end-of-turn detection" front uses the
-    triggering user turn's ``commit_latency_ms`` (last word -> commit) when
-    present, else the raw-timestamp ``eos_to_push``; the remainder is "dispatch".
-    ``total`` is ``acoustic_latency`` when measured, else
-    ``eos_to_push + audio_latency`` (the view overlays the recording-measured
-    caliper as the headline). Segments always sum to ``total``. Turns with no
-    audio timing (filler / manual_say / tool turns) are skipped.
-    """
-    rows = []
-    record_start = _record_start(payload)
-    call_log = payload.get("call_log") or []
-    for idx, e in enumerate(call_log):
-        if e.get("role") not in ("assistant", "assistant-manual"):
-            continue
-        aud = _pos(e.get("audio_latency"))
-        if not aud:
-            continue
-        lat, utt = _pos(e.get("latency")), _pos(e.get("utterance_latency"))
-        ac = _pos(e.get("acoustic_latency"))
-
-        eos = _pos(e.get("eos_to_push_latency"))
-        derived_eos = False
-        if eos is None:
-            lwe, sp = e.get("last_word_end_wall_us"), e.get("status_pushed_wall_us")
-            if isinstance(lwe, (int, float)) and isinstance(sp, (int, float)) and sp > lwe:
-                eos = round((sp - lwe) / 1000)
-                derived_eos = True
-
-        # End-of-turn detection: the user turn's commit_latency_ms (last word →
-        # commit) — the real "how long to realize he's done". Preferred over the
-        # raw-timestamp eos, which also lumps in post-ASR dispatch.
-        asr_td, eot_info = _preceding_user_asr(call_log, idx)
-        td = asr_td if asr_td is not None else eos
-        td_source = "asr" if asr_td is not None else ("eos" if eos is not None else None)
-        tool_ms, tool_names = _preceding_tools(call_log, idx)
-
-        total = ac if ac else (eos or asr_td or 0) + aud
-        segs = []
-
-        front = total - aud  # pre-model: detection + dispatch + tool call
-        used_td, tool_used = None, 0
-        if front > 0:
-            if td is not None and td <= front:
-                used_td = round(td)
-                # commit_latency_ms == 0 on a "natural" (un-held) turn: instant
-                # detection, so emit no detection block — it's all dispatch.
-                if used_td > 0:
-                    segs.append({"key": "turn_detection", "label": "end-of-turn detection", "ms": used_td})
-                rem = round(front - used_td)
-                # Carve the SWAIG tool call(s) out of the remaining front so the
-                # function execution is its own band, not buried inside "dispatch".
-                tool_used = min(tool_ms, rem) if (tool_ms and rem > 0) else 0
-                dispatch_ms = rem - tool_used
-                if dispatch_ms > 0:
-                    segs.append({"key": "dispatch", "label": "dispatch", "ms": dispatch_ms})
-                if tool_used > 0:
-                    label = tool_names[0] if tool_names else "tool"
-                    if len(tool_names) > 1:
-                        label = "%s +%d" % (tool_names[0], len(tool_names) - 1)
-                    segs.append({"key": "tool", "label": label, "ms": tool_used})
-            else:
-                segs.append({"key": "turn_detection", "label": "end-of-turn detection", "ms": round(front)})
-                td_source = None  # whole front unattributed
-
-        if lat and utt and utt >= lat and aud >= utt:
-            segs.append({"key": "ttft", "label": "model TTFT", "ms": lat})
-            if utt - lat > 0:
-                segs.append({"key": "model_utt", "label": "model→utterance", "ms": utt - lat})
-            if aud - utt > 0:
-                segs.append({"key": "utt_audio", "label": "utterance→audio", "ms": aud - utt})
-        else:
-            segs.append({"key": "model", "label": "model + TTS", "ms": aud})
-
-        rows.append({
-            "idx": idx,
-            "seek": _seek(e, record_start),
-            "text": (e.get("content") or "").strip()[:80],
-            "segments": segs,
-            "total": round(total),
-            "audio": aud,
-            "acoustic": ac,
-            "eos": eos,
-            "derived_eos": derived_eos,
-            "td": used_td,
-            "td_source": td_source,
-            "eot": eot_info,
-            "tool": tool_used,
-            "tool_names": tool_names,
-        })
-    return rows
 
 
 def _preceding_user_entry(call_log: list, idx: int):
