@@ -718,6 +718,156 @@ def latency_breakdown(payload: dict) -> list:
     return rows
 
 
+def _preceding_user_entry(call_log: list, idx: int):
+    """The user turn that triggered AI turn ``idx`` (skipping tool/filler/thinking)."""
+    for j in range(idx - 1, -1, -1):
+        e = call_log[j]
+        role = e.get("role")
+        if role == "user":
+            return e
+        if role == "assistant" and e.get("content"):
+            break
+    return None
+
+
+def _speed(ms):
+    """Speed bucket for colour/feel: fast ⚡ / ok / slow."""
+    if not isinstance(ms, (int, float)):
+        return "na"
+    return "fast" if ms < 1500 else ("ok" if ms < 3000 else "slow")
+
+
+def _verdict(user_entry: dict, det_ms: float):
+    """Plain-English turn-taking verdict + kind, from the DG end-of-turn telemetry.
+
+    The "cool" line: did it snap because it *knew*, or hold patiently without
+    cutting the caller off, or get forced / uncertain.
+    """
+    eot = (user_entry or {}).get("eot") or {}
+    basis = eot.get("basis")
+    conf = eot.get("confidence")
+    conf_pct = conf * 100 if isinstance(conf, (int, float)) else None
+    timing = (user_entry or {}).get("timing") or {}
+    segs = timing.get("segments")
+    entity = (user_entry or {}).get("entity") or {}
+    secs = "%.1fs" % (det_ms / 1000) if det_ms else None
+
+    if basis == "entity_snap":
+        what = entity.get("type")
+        return ("snap", "snapped the instant it had a valid %s" % what if what
+                else "snapped on a complete entity")
+    if basis == "natural":
+        return ("instant", "clean finish — committed instantly")
+    if basis == "ceiling":
+        return ("forced", "forced at the hold ceiling — may have clipped the caller")
+    if basis == "growth_stop":
+        if isinstance(segs, (int, float)) and segs > 1:
+            return ("held", "let the caller finish all %d parts — never cut in (%s)"
+                    % (int(segs), secs or "held"))
+        if conf_pct is not None and conf_pct < 50:
+            return ("uncertain", "shaky endpoint, %.0f%% — held %s" % (conf_pct, secs or "briefly"))
+        return ("held", "held %s to be sure — no cutoff" % (secs or "briefly"))
+    return (None, None)
+
+
+def build_flow(payload: dict, analysis: dict = None) -> list:
+    """Per-exchange flow for the Timeline tab: each AI response paired with the
+    turn it answered and a latency split that sums to the **recording truth**.
+
+    Latency = ``turn detection`` (the DG hold, ``commit_latency_ms``) + ``tool``
+    (SWAIG ``execution_latency``) + ``model`` (everything else up to first audio).
+    The total is the wav caliper when the recording matched, else the server's
+    ``acoustic_latency`` (flagged). No invented residual — ``model`` absorbs the
+    rest of the measured gap and is labelled as the model, not as grey.
+    """
+    call_log = payload.get("call_log") or []
+    record_start = _record_start(payload)
+    wavmap = {}
+    if analysis:
+        try:
+            for p in align_latency(payload, analysis).get("pairs", []):
+                if p.get("text"):
+                    wavmap[p["text"]] = p["wav_ms"]
+        except Exception:
+            pass
+
+    out = []
+    for idx, e in enumerate(call_log):
+        if e.get("role") != "assistant" or not e.get("content"):
+            continue
+        text = (e.get("content") or "").strip()
+        aud = _pos(e.get("audio_latency"))
+        lat, utt = _pos(e.get("latency")), _pos(e.get("utterance_latency"))
+        ac = _pos(e.get("acoustic_latency"))
+        wav = wavmap.get(text) or wavmap.get(text[:80])
+
+        user_entry = _preceding_user_entry(call_log, idx)
+        tool_ms, tool_names = _preceding_tools(call_log, idx)
+        timing = (user_entry or {}).get("timing") or {}
+        det = timing.get("commit_latency_ms")
+        if not isinstance(det, (int, float)):
+            det = timing.get("hold_ms")
+        det = det if isinstance(det, (int, float)) else 0
+
+        # total = recording truth, else server acoustic, else eos+audio, else audio
+        total = wav or ac or ((_pos(e.get("eos_to_push_latency")) or 0) + (aud or 0)) or aud
+        if not total:
+            continue
+        # Reserve the measured model→audio time as a floor so the model band is
+        # always visible, then detection (turn-taking priority) and tool fit into
+        # what's left; any remainder folds into the model (first-pass / TTS).
+        model_floor = min(aud or 0, total)
+        det_seg = min(det, max(0, total - model_floor))
+        tool_seg = min(tool_ms, max(0, total - model_floor - det_seg)) if tool_ms else 0
+        model_seg = max(0, total - det_seg - tool_seg)
+
+        human = None
+        if user_entry:
+            talk = user_entry.get("speaking_to_final_event")
+            if not isinstance(talk, (int, float)):
+                st, en = user_entry.get("start_timestamp"), user_entry.get("end_timestamp")
+                try:
+                    talk = round((float(en) - float(st)) / 1000) if (st and en) else None
+                except Exception:
+                    talk = None
+            eot = user_entry.get("eot") or {}
+            human = {
+                "text": (user_entry.get("content") or "").strip(),
+                "talk_ms": talk,
+                "confidence": (user_entry.get("confidence") * 100
+                               if isinstance(user_entry.get("confidence"), (int, float)) else None),
+                "eot_basis": eot.get("basis"),
+                "eot_conf": (eot.get("confidence") * 100
+                             if isinstance(eot.get("confidence"), (int, float)) else None),
+                "segments": timing.get("segments"),
+                "entity": user_entry.get("entity"),
+            }
+
+        verdict_kind, verdict_text = _verdict(user_entry, det_seg)
+        out.append({
+            "idx": idx,
+            "seek": _seek(e, record_start),
+            "ai_text": text,
+            "human": human,
+            "total": round(total),
+            "total_source": "recording" if wav else "server",
+            "speed": _speed(total),
+            "det": round(det_seg),
+            "tool": round(tool_seg),
+            "tool_names": tool_names,
+            "model": round(model_seg),
+            "ttft": lat,
+            "utterance": utt,
+            "audio": aud,
+            "acoustic": ac,
+            "wav": wav,
+            "diverges": bool(wav and ac and abs(ac - wav) > max(400, 0.25 * wav)),
+            "verdict": verdict_text,
+            "verdict_kind": verdict_kind,
+        })
+    return out
+
+
 # --------------------------------------------------------------------------- #
 # Functions (the Functions tab — from swaig_log)
 # --------------------------------------------------------------------------- #

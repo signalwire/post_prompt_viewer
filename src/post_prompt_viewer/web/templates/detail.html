@@ -98,8 +98,8 @@
 <nav class="tabs" role="tablist">
   <button class="tab" data-tab="overview" role="tab" aria-selected="true">Overview</button>
   <button class="tab" data-tab="conversation" role="tab">Conversation <span class="tab-count">{{ rec.num_turns }}</span></button>
-  <button class="tab" data-tab="timeline" role="tab">Timeline <span class="tab-count">{{ timeline | length }}</span></button>
-  <button class="tab" data-tab="latency" role="tab">Latency <span class="tab-count">{{ latency.points | length }}</span></button>
+  <button class="tab" data-tab="latency" role="tab">Timeline <span class="tab-count">{{ flow | length }}</span></button>
+  <button class="tab" data-tab="timeline" role="tab">Events <span class="tab-count">{{ timeline | length }}</span></button>
   <button class="tab" data-tab="functions" role="tab">Functions <span class="tab-count">{{ functions | length }}</span></button>
   <button class="tab" data-tab="telemetry" role="tab">Telemetry</button>
   <button class="tab" data-tab="raw" role="tab">Raw</button>
@@ -224,35 +224,56 @@
   <p class="note" style="margin:0 0 18px">{{ breakdown_stats.rec_count }} of {{ breakdown_stats.count }} turns measured from the recording (silence&rarr;voice); the rest are server estimates.</p>
   {% endif %}
 
-  <div class="card" id="latency-server">
-    <span class="eyebrow">Per-turn latency pipeline · anchored at user-stopped-talking</span>
-    <div class="lat-legend" style="margin:10px 0 14px">
-      <span><span class="sw seg-turn_detection"></span>end-of-turn detection</span>
-      <span><span class="sw seg-dispatch"></span>dispatch</span>
-      <span><span class="sw seg-tool"></span>tool call</span>
-      <span><span class="sw seg-ttft"></span>model TTFT</span>
-      <span><span class="sw seg-model_utt"></span>model&rarr;utterance</span>
-      <span><span class="sw seg-utt_audio"></span>utterance&rarr;audio</span>
-      <span><span class="sw" style="background:var(--sw-gold)"></span>wav-measured</span>
-    </div>
-    {% for r in breakdown %}
-    <div class="sbar-row{{ ' seekable' if r.seek is not none }}"{% if r.seek is not none %} data-turn="{{ r.idx }}" data-seek="{{ r.seek }}"{% endif %}>
-      <div class="sbar-line">
-        <div class="sbar">
-          {% for s in r.segments %}<div class="sbar-seg seg-{{ s.key }}" style="width:{{ (s.ms / breakdown_scale * 100) | round(2) }}%" title="{{ s.label }}: {{ s.ms }} ms"></div>{% endfor %}
-          {% if wavmap.get(r.text) %}<div class="sbar-wav" style="left:{{ (wavmap[r.text] / breakdown_scale * 100) | round(2) }}%" title="recording-measured: {{ wavmap[r.text] }} ms"></div>{% endif %}
+  {# ── Flow: the call as turn-taking + latency, anchored on the recording truth ── #}
+  {% set vicon = {'snap':'⚡','instant':'✓','held':'✓','uncertain':'?','forced':'⚠'} %}
+  <div class="flow">
+    {% for f in flow %}
+    <article class="fx speed-{{ f.speed }}{{ ' seekable' if f.seek is not none }}" style="--d:{{ (loop.index0 * 0.05) | round(2) }}s"{% if f.seek is not none %} data-turn="{{ f.idx }}" data-seek="{{ f.seek }}"{% endif %}>
+      {% if f.human %}
+      <div class="fx-caller">
+        <span class="fx-who">caller</span>
+        <span class="fx-quote">{{ f.human.text or '—' }}</span>
+        <span class="fx-aside">
+          {%- if f.human.talk_ms %}spoke {{ (f.human.talk_ms / 1000) | round(1) }}s{% endif -%}
+          {%- if f.human.segments and f.human.segments > 1 %} · {{ f.human.segments }} segments{% endif -%}
+          {%- if f.human.entity %} · <span class="fx-ent">{{ f.human.entity.type }} {{ f.human.entity.value }}</span>{% endif -%}
+        </span>
+      </div>
+      {% else %}
+      <div class="fx-caller"><span class="fx-who fx-open">opening</span><span class="fx-aside">the agent spoke first</span></div>
+      {% endif %}
+
+      <button class="fx-lat" type="button" aria-expanded="false">
+        {% if f.verdict %}<span class="fx-verdict vk-{{ f.verdict_kind }}">{{ vicon.get(f.verdict_kind, '·') }} {{ f.verdict }}</span>{% endif %}
+        <span class="fx-barrow">
+          <span class="fx-bar" aria-hidden="true">
+            {% if f.det %}<span class="fseg fseg-det" style="--w:{{ (f.det / flow_scale * 100) | round(2) }}%" title="turn detection {{ f.det }}ms"></span>{% endif %}
+            {% if f.tool %}<span class="fseg fseg-tool" style="--w:{{ (f.tool / flow_scale * 100) | round(2) }}%" title="tool {{ f.tool }}ms"></span>{% endif %}
+            {% if f.model %}<span class="fseg fseg-model" style="--w:{{ (f.model / flow_scale * 100) | round(2) }}%" title="model {{ f.model }}ms"></span>{% endif %}
+          </span>
+          <span class="fx-total">{{ f.total }}<span class="u">ms</span>{% if f.speed == 'fast' %} <span class="fx-zap">⚡</span>{% endif %}</span>
+          <span class="fx-chev" aria-hidden="true">▸</span>
+        </span>
+      </button>
+
+      <div class="fx-detail" hidden>
+        <div class="fx-seglist">
+          {% if f.det %}<span class="fx-seg"><i class="fdot fseg-det"></i>turn detection <b>{{ f.det }}ms</b>{% if f.human and f.human.eot_basis %} · {{ f.human.eot_basis }}{% if f.human.eot_conf is not none %} {{ '%.0f'|format(f.human.eot_conf) }}%{% endif %}{% endif %}</span>{% endif %}
+          {% if f.tool %}<span class="fx-seg"><i class="fdot fseg-tool"></i>tool · {{ f.tool_names | join(' + ') }} <b>{{ f.tool }}ms</b></span>{% endif %}
+          <span class="fx-seg"><i class="fdot fseg-model"></i>model <b>{{ f.model }}ms</b>{% if f.ttft %} · TTFT {{ f.ttft }}ms{% endif %}{% if f.audio %} · first audio {{ f.audio }}ms{% endif %}</span>
         </div>
-        <div class="sbar-value" title="user stopped talking → AI started{{ ' · recording-measured' if r.caliper else ' · server estimate' }}">{{ r.caliper or r.total }}<span class="u">ms</span></div>
+        <div class="fx-cross">
+          total from {{ 'the recording — silence &rarr; first agent audio' if f.total_source == 'recording' else 'a server estimate (no recording match)' }}.
+          {% if f.diverges %}<span class="fx-warn">⚠ the server's acoustic_latency claimed {{ f.acoustic }}ms here — the recording measured {{ f.wav }}ms. Trust the recording.</span>{% endif %}
+        </div>
       </div>
-      <div class="sbar-meta">
-        {% if r.caliper %}<span class="note">recording · server est {{ r.total }}ms</span>{% else %}<span class="note">server est{% if not r.acoustic %} · {{ 'eos+audio derived' if r.derived_eos else ('eos+audio' if r.eos else 'audio only') }}{% endif %}</span>{% endif %}
-        {% if r.td_source == 'asr' %}<span class="note{{ ' warn' if (r.eot and (r.eot.basis == 'ceiling' or (r.eot.confidence is not none and r.eot.confidence < 50))) else '' }}" title="end-of-turn detection — last word → commit (commit_latency_ms)">EOT {{ r.td }}ms{% if r.eot and r.eot.basis %} · {{ r.eot.basis }}{% if r.eot.confidence is not none %} {{ '%.0f'|format(r.eot.confidence) }}%{% endif %}{% endif %}</span>{% endif %}
-        {% if r.tool %}<span class="note tool-note" title="SWAIG function execution">{{ r.tool_names | join(' + ') }} · {{ r.tool }}ms</span>{% endif %}
-        <span class="lat-text">{{ r.text }}</span>
+
+      <div class="fx-ai">
+        <span class="fx-who ai">agent</span>
+        <span class="fx-quote">{{ f.ai_text }}</span>
       </div>
-    </div>
+    </article>
     {% endfor %}
-    <p class="note" style="margin-top:12px">The number on the right is the <b>turn latency</b> — user stopped talking &rarr; AI started — measured from the <b>recording</b>'s silence gap when one exists, else a server estimate. The bar is the telemetry's account of that gap: <b>end-of-turn detection</b> (<code>commit_latency_ms</code>, last word &rarr; commit, tagged with the <code>eot</code> basis — <i>entity_snap</i> commits fast, <i>growth_stop</i>/<i>ceiling</i> waited) + <b>dispatch</b> + the model/TTS tiers. The gold tick is the recording-measured value; bar overshoot past it is server-timing slack. The caller's talking time is not counted here.</p>
   </div>
 
   {# Recording-measured cross-validation. #}

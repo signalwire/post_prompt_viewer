@@ -193,6 +193,8 @@ async def detail(request: Request, call_id: str, src: str = "blessed"):
         "count": len(_lat),
         "rec_count": sum(1 for r in breakdown if r["caliper"] is not None),
     } if _lat else None
+    flow = enrich.build_flow(payload, analysis)
+    flow_scale = max([f["total"] for f in flow] + [1])
     source = "raw" if src == "raw" else "blessed"
     transcript = enrich.build_transcript(payload, source=source)
     # Sorted index of seekable spoken turns, for prev/next + current-turn highlight.
@@ -229,5 +231,7 @@ async def detail(request: Request, call_id: str, src: str = "blessed"):
             "wavmap": wavmap,
             "breakdown_scale": breakdown_scale,
             "breakdown_stats": breakdown_stats,
+            "flow": flow,
+            "flow_scale": flow_scale,
         },
     )

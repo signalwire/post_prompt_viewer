@@ -28,6 +28,8 @@
     panels.forEach(function (p) {
       p.classList.toggle("active", p.id === "panel-" + id);
     });
+    var ap = document.getElementById("panel-" + id);
+    if (ap) { var fl = ap.querySelector(".flow"); if (fl) fl.classList.add("play"); }
     if (found && push) history.replaceState(null, "", "#" + id);
     return found;
   }
@@ -160,4 +162,15 @@
       });
     }
   }
+
+  // ---- Timeline flow: click a turn to expand its latency detail ----
+  Array.prototype.slice.call(document.querySelectorAll(".fx-lat")).forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      var detail = btn.parentNode.querySelector(".fx-detail");
+      if (!detail) return;
+      var willOpen = detail.hasAttribute("hidden");
+      if (willOpen) { detail.removeAttribute("hidden"); } else { detail.setAttribute("hidden", ""); }
+      btn.setAttribute("aria-expanded", willOpen ? "true" : "false");
+    });
+  });
 })();
