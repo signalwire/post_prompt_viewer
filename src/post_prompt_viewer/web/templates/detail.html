@@ -136,6 +136,16 @@
   </div>
   {% endif %}
 
+  {% set ent_turns = transcript | selectattr('entity') | list %}
+  {% if ent_turns %}
+  <div class="card">
+    <h3>Entities captured <span class="note" style="font-weight:400">· {{ ent_turns | length }}</span></h3>
+    <div class="chips" style="display:flex;flex-wrap:wrap;gap:6px;margin-top:10px">
+      {% for t in ent_turns %}<span class="chip entity {{ 'ok' if t.entity.valid else 'bad' }}" title="{{ 'valid' if t.entity.valid else 'invalid' }} {{ t.entity.type }}">{{ t.entity.type }} <b>{{ t.entity.value }}</b> {{ '✓' if t.entity.valid else '✕' }}</span>{% endfor %}
+    </div>
+  </div>
+  {% endif %}
+
   <div class="card">
     <h3>Call</h3>
     <dl class="kv">
@@ -217,7 +227,7 @@
     <span class="eyebrow">Per-turn latency pipeline · anchored at user-stopped-talking</span>
     <div class="lat-legend" style="margin:10px 0 14px">
       <span><span class="sw seg-turn_detection"></span>turn detection</span>
-      <span><span class="sw seg-poll"></span>ASR poll</span>
+      <span><span class="sw seg-dispatch"></span>dispatch</span>
       <span><span class="sw seg-ttft"></span>model TTFT</span>
       <span><span class="sw seg-model_utt"></span>model&rarr;utterance</span>
       <span><span class="sw seg-utt_audio"></span>utterance&rarr;audio</span>
@@ -234,12 +244,13 @@
       </div>
       <div class="sbar-meta">
         {% if not r.acoustic %}<span class="note">({{ 'eos+audio · derived' if r.derived_eos else ('eos+audio' if r.eos else 'audio only') }})</span>{% endif %}
+        {% if r.td_source == 'asr' %}<span class="note" title="turn detection from the user turn's ASR commit latency">turn-detect {{ r.td }}ms · ASR{% if r.speak_to_final %} · speak&rarr;final {{ r.speak_to_final }}ms{% endif %}</span>{% endif %}
         {% if wavmap.get(r.text) %}<span class="note">wav {{ wavmap[r.text] }} ms</span>{% endif %}
         <span class="lat-text">{{ r.text }}</span>
       </div>
     </div>
     {% endfor %}
-    <p class="note" style="margin-top:12px">The number on the right is the <b>turn latency</b> — user stopped talking &rarr; AI heard. It equals <b>acoustic_latency</b> when measured, otherwise <b>eos_to_push + audio_latency</b> (turn-detection derived from the raw word-end timestamps where present). Segments sum to it; the gold tick is the recording-measured value.</p>
+    <p class="note" style="margin-top:12px">The number on the right is the <b>turn latency</b> — user stopped talking &rarr; AI heard. Segments sum to it: <b>turn detection</b> (the user turn's real ASR endpoint hold when present, else derived from raw word-end timestamps) + <b>dispatch</b> (gather/validation before the model is prompted) + the model/TTS tiers. It equals <b>acoustic_latency</b> when measured, otherwise <b>eos_to_push + audio_latency</b>. The gold tick is the recording-measured value.</p>
   </div>
 
   {# Recording-measured cross-validation. #}
