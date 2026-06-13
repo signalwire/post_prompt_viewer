@@ -156,3 +156,21 @@ def test_latency_breakdown_uses_asr_turn_detection():
     assert r["eot"]["basis"] == "growth_stop"
     assert r["eot"]["confidence"] == pytest.approx(80.0)
     assert sum(s["ms"] for s in r["segments"]) == r["total"] == 1500
+
+
+def test_latency_breakdown_pairs_user_across_tool_calls():
+    # Tool-call / filler / tool-result entries sit between the user's answer and
+    # the spoken reply; detection must still use the user turn's commit_latency_ms.
+    payload = {"call_log": [
+        {"role": "user", "content": "714 East Osage", "timestamp": 1,
+         "timing": {"commit_latency_ms": 5000}, "eot": {"basis": "growth_stop", "confidence": 0.9}},
+        {"role": "assistant-manual", "content": "One moment.", "timestamp": 2},
+        {"role": "assistant", "timestamp": 3,
+         "tool_calls": [{"id": "1", "type": "function", "function": {"name": "validate", "arguments": "{}"}}]},
+        {"role": "tool", "content": "ok", "timestamp": 4},
+        {"role": "assistant", "content": "The pickup address is set.", "timestamp": 5,
+         "latency": 500, "utterance_latency": 600, "audio_latency": 700, "acoustic_latency": 8000},
+    ]}
+    r = next(x for x in enrich.latency_breakdown(payload) if x["text"].startswith("The pickup"))
+    assert r["td_source"] == "asr" and r["td"] == 5000
+    assert r["eot"]["basis"] == "growth_stop"

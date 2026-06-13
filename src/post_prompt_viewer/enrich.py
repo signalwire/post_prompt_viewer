@@ -580,7 +580,11 @@ def _preceding_user_asr(call_log: list, idx: int):
                 eot = {"basis": raw_eot["basis"],
                        "confidence": conf * 100 if isinstance(conf, (int, float)) else None}
             return (td if isinstance(td, (int, float)) else None, eot)
-        if role in ("assistant", "assistant-manual"):
+        # Stop only at a previous *spoken* AI turn (crossing into the prior
+        # exchange). Tool-calls, fillers (assistant-manual), thinking and tool
+        # results sit between the user's answer and the reply in a tool-using
+        # flow — scan past them to reach the user turn that triggered this turn.
+        if role == "assistant" and e.get("content"):
             break
     return (None, None)
 
@@ -632,13 +636,16 @@ def latency_breakdown(payload: dict) -> list:
         total = ac if ac else (eos or asr_td or 0) + aud
         segs = []
 
-        front = total - aud  # pre-model: turn detection + dispatch
+        front = total - aud  # pre-model: end-of-turn detection + dispatch
         used_td = None
         if front > 0:
-            if td and td <= front:
+            if td is not None and td <= front:
                 used_td = round(td)
-                segs.append({"key": "turn_detection", "label": "end-of-turn detection", "ms": used_td})
-                rem = round(front - td)
+                # commit_latency_ms == 0 on a "natural" (un-held) turn: instant
+                # detection, so emit no detection block — it's all dispatch.
+                if used_td > 0:
+                    segs.append({"key": "turn_detection", "label": "end-of-turn detection", "ms": used_td})
+                rem = round(front - used_td)
                 if rem > 0:
                     segs.append({"key": "dispatch", "label": "dispatch", "ms": rem})
             else:
