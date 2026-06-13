@@ -330,6 +330,35 @@ def build_transcript(payload: dict, source: str = "blessed") -> list:
             turn["speaker"] = "human"
             if isinstance(e.get("confidence"), (int, float)):
                 turn["confidence"] = e["confidence"] * 100
+            # Recognized entity (email / phone / ssn / …): normalized + validated.
+            ent = e.get("entity")
+            if isinstance(ent, dict) and ent.get("value"):
+                turn["entity"] = {
+                    "type": ent.get("type"),
+                    "value": ent.get("value"),
+                    "valid": bool(ent.get("valid")),
+                }
+            # End-of-turn decision: how the boundary was chosen, and how sure.
+            eot = e.get("eot")
+            if isinstance(eot, dict) and eot.get("basis"):
+                conf = eot.get("confidence")
+                turn["eot"] = {
+                    "basis": eot["basis"],
+                    "confidence": conf * 100 if isinstance(conf, (int, float)) else None,
+                }
+            # ASR / turn-detection timing (ms): how long finalizing this turn took.
+            asr = {}
+            timing = e.get("timing")
+            if isinstance(timing, dict):
+                for k in ("commit_latency_ms", "hold_ms", "segments"):
+                    if isinstance(timing.get(k), (int, float)):
+                        asr[k] = timing[k]
+            for k in ("speaking_to_final_event", "speaking_to_turn_detection",
+                      "turn_detection_to_final_event"):
+                if isinstance(e.get(k), (int, float)):
+                    asr[k] = e[k]
+            if asr:
+                turn["asr"] = asr
             for k in ("speaker", "barge_count", "merge_count", "merged"):
                 if e.get(k) not in (None, 0, False):
                     turn["meta"][k] = e[k]

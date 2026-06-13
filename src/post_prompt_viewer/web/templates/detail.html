@@ -18,7 +18,14 @@
     {% endif %}
     {% if t.barge %}<span class="chip accent">barged @ {{ t.barge.elapsed_ms }}ms</span>{% endif %}
   {% elif t.kind == 'user' %}
+    {% if t.entity %}<span class="chip entity {{ 'ok' if t.entity.valid else 'bad' }}" title="extracted {{ t.entity.type }} — {{ 'valid' if t.entity.valid else 'invalid' }}">{{ t.entity.type }} <b>{{ t.entity.value }}</b> {{ '✓' if t.entity.valid else '✕' }}</span>{% endif %}
     {% if t.confidence is defined and t.confidence is not none %}<span class="chip">confidence <b>{{ '%.0f'|format(t.confidence) }}%</b></span>{% endif %}
+    {% if t.eot %}<span class="chip{{ ' warn' if (t.eot.confidence is not none and t.eot.confidence < 60) else '' }}" title="end-of-turn basis and confidence">eot {{ t.eot.basis }}{% if t.eot.confidence is not none %} <b>{{ '%.0f'|format(t.eot.confidence) }}%</b>{% endif %}</span>{% endif %}
+    {% if t.asr %}
+      {% if t.asr.speaking_to_final_event is not none %}<span class="chip" title="user began speaking → final transcript event">speak&rarr;final <b>{{ t.asr.speaking_to_final_event }}ms</b></span>{% endif %}
+      {% if t.asr.commit_latency_ms is not none %}<span class="chip" title="ASR commit latency">ASR <b>{{ t.asr.commit_latency_ms }}ms</b></span>{% endif %}
+      {% if t.asr.segments is not none %}<span class="chip" title="ASR speech segments">{{ t.asr.segments }} seg</span>{% endif %}
+    {% endif %}
     {% for k, v in t.meta.items() %}<span class="chip">{{ k }} <b>{{ v }}</b></span>{% endfor %}
   {% elif t.kind == 'tool' %}
     {% for k, v in (t.latency or {}).items() %}<span class="chip">{{ tier_label.get(k, k) }} <b>{{ v }}ms</b></span>{% endfor %}

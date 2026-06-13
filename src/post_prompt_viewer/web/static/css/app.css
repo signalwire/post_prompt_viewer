@@ -144,6 +144,9 @@ code, pre, .mono { font-family: var(--font-code); }
 }
 .chip b { color: var(--fg-secondary); font-weight: 600; }
 .chip.accent { color: var(--sw-fuchsia); border-color: rgba(247, 42, 114, 0.3); }
+.chip.entity.ok { color: var(--sw-turquoise); border-color: rgba(64, 224, 208, 0.4); }
+.chip.entity.bad { color: #ff6b6b; border-color: rgba(255, 107, 107, 0.4); }
+.chip.warn { color: var(--sw-gold); border-color: rgba(255, 215, 0, 0.35); }
 
 .badge {
   font-family: var(--font-code); font-size: 11px; padding: 2px 7px; border-radius: var(--radius-sm);

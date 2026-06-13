@@ -65,6 +65,28 @@ def test_functions(payload):
     assert isinstance(fns[0]["args"], dict)
 
 
+def test_user_turn_telemetry():
+    # entity extraction, end-of-turn basis/confidence, and ASR timing on a user turn
+    payload = {"call_log": [{
+        "role": "user", "content": "jordan.rivera at gmail.com", "timestamp": 2,
+        "confidence": 0.997,
+        "entity": {"type": "email", "valid": True, "value": "jordan.rivera@gmail.com"},
+        "eot": {"basis": "entity_snap", "confidence": 0.97},
+        "timing": {"commit_latency_ms": 398, "hold_ms": 398, "segments": 2},
+        "speaking_to_final_event": 5520,
+        "speaking_to_turn_detection": 4769,
+        "turn_detection_to_final_event": 750,
+    }]}
+    t = enrich.build_transcript(payload)[0]
+    assert t["entity"] == {"type": "email", "valid": True, "value": "jordan.rivera@gmail.com"}
+    assert t["eot"]["basis"] == "entity_snap"
+    assert t["eot"]["confidence"] == pytest.approx(97.0)
+    assert t["asr"]["commit_latency_ms"] == 398
+    assert t["asr"]["segments"] == 2
+    assert t["asr"]["speaking_to_final_event"] == 5520
+    assert t["asr"]["turn_detection_to_final_event"] == 750
+
+
 def test_align_latency_synthetic():
     rec = 100_000_000
     payload = {
