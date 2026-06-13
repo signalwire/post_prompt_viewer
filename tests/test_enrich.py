@@ -167,10 +167,14 @@ def test_latency_breakdown_pairs_user_across_tool_calls():
         {"role": "assistant-manual", "content": "One moment.", "timestamp": 2},
         {"role": "assistant", "timestamp": 3,
          "tool_calls": [{"id": "1", "type": "function", "function": {"name": "validate", "arguments": "{}"}}]},
-        {"role": "tool", "content": "ok", "timestamp": 4},
+        {"role": "tool", "content": "ok", "timestamp": 4,
+         "function_name": "validate", "execution_latency": 1200},
         {"role": "assistant", "content": "The pickup address is set.", "timestamp": 5,
          "latency": 500, "utterance_latency": 600, "audio_latency": 700, "acoustic_latency": 8000},
     ]}
     r = next(x for x in enrich.latency_breakdown(payload) if x["text"].startswith("The pickup"))
     assert r["td_source"] == "asr" and r["td"] == 5000
     assert r["eot"]["basis"] == "growth_stop"
+    seg = {s["key"]: s["ms"] for s in r["segments"]}
+    assert seg.get("tool") == 1200 and r["tool_names"] == ["validate"]
+    assert sum(s["ms"] for s in r["segments"]) == r["total"]

@@ -229,6 +229,7 @@
     <div class="lat-legend" style="margin:10px 0 14px">
       <span><span class="sw seg-turn_detection"></span>end-of-turn detection</span>
       <span><span class="sw seg-dispatch"></span>dispatch</span>
+      <span><span class="sw seg-tool"></span>tool call</span>
       <span><span class="sw seg-ttft"></span>model TTFT</span>
       <span><span class="sw seg-model_utt"></span>model&rarr;utterance</span>
       <span><span class="sw seg-utt_audio"></span>utterance&rarr;audio</span>
@@ -246,6 +247,7 @@
       <div class="sbar-meta">
         {% if r.caliper %}<span class="note">recording · server est {{ r.total }}ms</span>{% else %}<span class="note">server est{% if not r.acoustic %} · {{ 'eos+audio derived' if r.derived_eos else ('eos+audio' if r.eos else 'audio only') }}{% endif %}</span>{% endif %}
         {% if r.td_source == 'asr' %}<span class="note{{ ' warn' if (r.eot and (r.eot.basis == 'ceiling' or (r.eot.confidence is not none and r.eot.confidence < 50))) else '' }}" title="end-of-turn detection — last word → commit (commit_latency_ms)">EOT {{ r.td }}ms{% if r.eot and r.eot.basis %} · {{ r.eot.basis }}{% if r.eot.confidence is not none %} {{ '%.0f'|format(r.eot.confidence) }}%{% endif %}{% endif %}</span>{% endif %}
+        {% if r.tool %}<span class="note tool-note" title="SWAIG function execution">{{ r.tool_names | join(' + ') }} · {{ r.tool }}ms</span>{% endif %}
         <span class="lat-text">{{ r.text }}</span>
       </div>
     </div>

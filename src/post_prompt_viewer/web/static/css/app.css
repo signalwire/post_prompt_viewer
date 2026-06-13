@@ -330,6 +330,8 @@ details.code-collapse > pre.code { margin-top: 8px; }
 .seg-turn_detection { background: var(--sw-blue); }
 .seg-poll { background: #73737e; }
 .seg-dispatch { background: #73737e; }
+.seg-tool { background: var(--sw-purple); }
+.sbar-meta .tool-note { color: #9a7bff; }
 .seg-ttft { background: rgba(247, 42, 114, 0.40); }
 .seg-model_utt { background: rgba(247, 42, 114, 0.66); }
 .seg-utt_audio { background: rgba(247, 42, 114, 0.92); }

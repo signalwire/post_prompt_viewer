@@ -589,6 +589,34 @@ def _preceding_user_asr(call_log: list, idx: int):
     return (None, None)
 
 
+def _preceding_tools(call_log: list, idx: int):
+    """SWAIG tool calls that ran for AI turn ``idx``.
+
+    Returns ``(total_execution_ms, [function_names])`` from the ``tool`` result
+    entries between this spoken turn and the user turn that triggered it (same
+    boundary as :func:`_preceding_user_asr`).
+    """
+    total_ms = 0
+    names = []
+    for j in range(idx - 1, -1, -1):
+        e = call_log[j]
+        role = e.get("role")
+        if role == "tool":
+            ms = e.get("execution_latency")
+            if not isinstance(ms, (int, float)):
+                ms = e.get("function_latency") or e.get("latency")
+            if isinstance(ms, (int, float)) and ms > 0:
+                total_ms += ms
+            if e.get("function_name"):
+                names.append(e["function_name"])
+        elif role == "user":
+            break
+        elif role == "assistant" and e.get("content"):
+            break
+    names.reverse()
+    return (round(total_ms), names)
+
+
 def latency_breakdown(payload: dict) -> list:
     """Per-AI-turn pipeline decomposition for a stacked bar, anchored at
     "user stopped talking" per ENRICHED_CALL_LOG.md.
@@ -632,12 +660,13 @@ def latency_breakdown(payload: dict) -> list:
         asr_td, eot_info = _preceding_user_asr(call_log, idx)
         td = asr_td if asr_td is not None else eos
         td_source = "asr" if asr_td is not None else ("eos" if eos is not None else None)
+        tool_ms, tool_names = _preceding_tools(call_log, idx)
 
         total = ac if ac else (eos or asr_td or 0) + aud
         segs = []
 
-        front = total - aud  # pre-model: end-of-turn detection + dispatch
-        used_td = None
+        front = total - aud  # pre-model: detection + dispatch + tool call
+        used_td, tool_used = None, 0
         if front > 0:
             if td is not None and td <= front:
                 used_td = round(td)
@@ -646,8 +675,17 @@ def latency_breakdown(payload: dict) -> list:
                 if used_td > 0:
                     segs.append({"key": "turn_detection", "label": "end-of-turn detection", "ms": used_td})
                 rem = round(front - used_td)
-                if rem > 0:
-                    segs.append({"key": "dispatch", "label": "dispatch", "ms": rem})
+                # Carve the SWAIG tool call(s) out of the remaining front so the
+                # function execution is its own band, not buried inside "dispatch".
+                tool_used = min(tool_ms, rem) if (tool_ms and rem > 0) else 0
+                dispatch_ms = rem - tool_used
+                if dispatch_ms > 0:
+                    segs.append({"key": "dispatch", "label": "dispatch", "ms": dispatch_ms})
+                if tool_used > 0:
+                    label = tool_names[0] if tool_names else "tool"
+                    if len(tool_names) > 1:
+                        label = "%s +%d" % (tool_names[0], len(tool_names) - 1)
+                    segs.append({"key": "tool", "label": label, "ms": tool_used})
             else:
                 segs.append({"key": "turn_detection", "label": "end-of-turn detection", "ms": round(front)})
                 td_source = None  # whole front unattributed
@@ -674,6 +712,8 @@ def latency_breakdown(payload: dict) -> list:
             "td": used_td,
             "td_source": td_source,
             "eot": eot_info,
+            "tool": tool_used,
+            "tool_names": tool_names,
         })
     return rows
 
