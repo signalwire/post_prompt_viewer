@@ -885,6 +885,8 @@ def build_waterfall(payload: dict) -> dict:
         "gather_answer": "gather", "step_change": "step", "context_enter": "step",
         "session_start": "meta", "session_end": "meta",
     }
+    funcs = build_functions(payload)
+    fi = 0
     out = []
     for e in events:
         ts = e.get("ts")
@@ -894,6 +896,7 @@ def build_waterfall(payload: dict) -> dict:
         etype = e["type"]
         off = (ts - start) / 1000
         dur = 0
+        swaig = None
         if etype == "user_input":
             st, en = d.get("start_timestamp"), d.get("end_timestamp")
             try:
@@ -910,6 +913,9 @@ def build_waterfall(payload: dict) -> dict:
             dur = d.get("audio_latency") or 0
         elif etype == "function_call":
             dur = d.get("duration_ms") or 0
+            if fi < len(funcs):
+                swaig = funcs[fi]
+                fi += 1
         out.append({
             "type": etype,
             "lane": lanes.get(etype, "meta"),
@@ -919,6 +925,7 @@ def build_waterfall(payload: dict) -> dict:
             "off": round(max(0, off)),
             "dur": round(dur),
             "details": d,
+            "swaig": swaig,
         })
     out.sort(key=lambda ev: ev["off"])
     return {"events": out, "span": span}

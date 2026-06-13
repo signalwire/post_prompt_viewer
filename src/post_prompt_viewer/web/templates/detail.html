@@ -99,10 +99,7 @@
   <button class="tab" data-tab="overview" role="tab" aria-selected="true">Overview</button>
   <button class="tab" data-tab="conversation" role="tab">Conversation <span class="tab-count">{{ rec.num_turns }}</span></button>
   <button class="tab" data-tab="latency" role="tab">Timeline <span class="tab-count">{{ flow | length }}</span></button>
-  <button class="tab" data-tab="timeline" role="tab">Events <span class="tab-count">{{ timeline | length }}</span></button>
-  <button class="tab" data-tab="functions" role="tab">Functions <span class="tab-count">{{ functions | length }}</span></button>
-  <button class="tab" data-tab="telemetry" role="tab">Telemetry</button>
-  <button class="tab" data-tab="raw" role="tab">Raw</button>
+  <button class="tab" data-tab="telemetry" role="tab">Data</button>
 </nav>
 
 {# ===================== OVERVIEW ===================== #}
@@ -173,45 +170,7 @@
   </div>
 </section>
 
-{# ===================== TIMELINE ===================== #}
-<section class="tab-panel" id="panel-timeline" role="tabpanel">
-  {% if timeline %}
-  <div class="page-head" style="margin-bottom:12px">
-    <span class="note">{{ timeline | length }} events</span>
-    <button class="btn secondary" id="tl-toggle-all" data-open="0">Expand all</button>
-  </div>
-  <div class="timeline">
-    {% for e in timeline %}
-    <div class="tl-event kind-{{ e.type }}">
-      {% if e.details %}
-      <details class="tl-event-body">
-        <summary>
-          <span class="tl-label">{{ e.label }}</span>
-          {% if e.elapsed %}<span class="tl-elapsed">+{{ e.elapsed }}</span>{% endif %}
-          {% if e.ts_str %}<span class="tl-time">{{ e.ts_str }}</span>{% endif %}
-          <span class="tl-count">{{ e.details | length }} field{{ 's' if e.details | length != 1 }}</span>
-        </summary>
-        <div class="tl-details">
-          {% if 'original' in e.details and 'result' in e.details %}
-          <div class="tl-rewrite"><span class="from">{{ e.details.original | string | truncate(90, true) }}</span> &rarr; <span class="to">{{ e.details.result | string | truncate(90, true) }}</span></div>
-          {% endif %}
-          {% for k, v in e.details.items() %}{% if k not in ['original', 'result'] %}<span class="chip">{{ k }} <b>{{ v | string | truncate(40, true) }}</b></span>{% endif %}{% endfor %}
-        </div>
-      </details>
-      {% else %}
-      <div class="tl-head tl-static">
-        <span class="tl-label">{{ e.label }}</span>
-        {% if e.elapsed %}<span class="tl-elapsed">+{{ e.elapsed }}</span>{% endif %}
-        {% if e.ts_str %}<span class="tl-time">{{ e.ts_str }}</span>{% endif %}
-      </div>
-      {% endif %}
-    </div>
-    {% endfor %}
-  </div>
-  {% else %}<p class="note">No timeline events.</p>{% endif %}
-</section>
-
-{# ===================== LATENCY ===================== #}
+{# ===================== TIMELINE (Flow + Waterfall) ===================== #}
 <section class="tab-panel" id="panel-latency" role="tabpanel">
   <div class="subtabs">
     <button class="subtab active" data-sub="flow" type="button">Flow</button>
@@ -363,7 +322,16 @@
         </div>
       </div>
       <div class="wf-detail" hidden>
+        {% if ev.swaig %}
+        <div style="width:100%">
+          <span class="eyebrow">{{ ev.swaig.name }} &middot; arguments</span>
+          <pre class="code" style="margin:5px 0 10px">{{ ev.swaig.args | pretty }}</pre>
+          {% if ev.swaig.result %}<details class="code-collapse"><summary>result &middot; {{ ev.swaig.result | string | length }} chars</summary><pre class="code">{{ ev.swaig.result }}</pre></details>{% endif %}
+          {% if ev.swaig.post_response %}<details class="code-collapse"><summary>post_response</summary><pre class="code">{{ ev.swaig.post_response | pretty }}</pre></details>{% endif %}
+        </div>
+        {% else %}
         {% for k, v in ev.details.items() %}{% if v not in (None, '') %}<span class="chip">{{ k }} <b>{{ v | string | truncate(48, true) }}</b></span>{% endif %}{% endfor %}
+        {% endif %}
       </div>
       {% endfor %}
     </div>
@@ -371,32 +339,7 @@
   </div>
 </section>
 
-{# ===================== FUNCTIONS ===================== #}
-<section class="tab-panel" id="panel-functions" role="tabpanel">
-  {% if functions %}
-    {% for f in functions %}
-    <div class="card">
-      <div class="page-head" style="margin:0 0 10px">
-        <h3 style="margin:0">{{ f.name }}</h3>
-        <div class="chips">
-          {% for k, v in (f.latency or {}).items() %}<span class="chip">{{ tier_label.get(k, k) }} <b>{{ v }}ms</b></span>{% endfor %}
-          {% if f.ts_str %}<span class="chip">{{ f.ts_str }}</span>{% endif %}
-        </div>
-      </div>
-      <span class="eyebrow">Arguments</span>
-      <pre class="code" style="margin:6px 0 12px">{{ f.args | pretty }}</pre>
-      {% if f.result %}
-      <details class="code-collapse"><summary>Result &middot; {{ f.result | string | length }} chars</summary><pre class="code">{{ f.result }}</pre></details>
-      {% endif %}
-      {% if f.post_response %}
-      <details class="code-collapse"><summary>post_response</summary><pre class="code">{{ f.post_response | pretty }}</pre></details>
-      {% endif %}
-    </div>
-    {% endfor %}
-  {% else %}<p class="note">No SWAIG function calls on this call.</p>{% endif %}
-</section>
-
-{# ===================== TELEMETRY ===================== #}
+{# ===================== DATA (usage + raw) ===================== #}
 <section class="tab-panel" id="panel-telemetry" role="tabpanel">
   <div class="card">
     <h3>Usage</h3>
@@ -415,12 +358,8 @@
     <pre class="code">{{ global_data | pretty }}</pre>
   </div>
   {% endif %}
-</section>
-
-{# ===================== RAW ===================== #}
-<section class="tab-panel" id="panel-raw" role="tabpanel">
   <div class="card">
-    <span class="eyebrow">Stored payload</span>
+    <span class="eyebrow">Raw payload</span>
     <p class="note" style="margin:8px 0 14px">{{ payload | length }} top-level keys. The full JSON is large, so it isn't rendered inline &mdash; open or download it instead.</p>
     <a class="btn" href="{{ url_for('call_payload', call_id=rec.call_id) }}" target="_blank" rel="noopener">View JSON</a>
     <a class="btn secondary" href="{{ url_for('call_payload', call_id=rec.call_id) }}" download="{{ rec.call_id }}.json" style="margin-left:8px">Download</a>
