@@ -150,17 +150,6 @@
     }
   }
 
-  // ---- Timeline flow: click a turn to expand its latency detail ----
-  Array.prototype.slice.call(document.querySelectorAll(".fx-lat")).forEach(function (btn) {
-    btn.addEventListener("click", function () {
-      var detail = btn.parentNode.querySelector(".fx-detail");
-      if (!detail) return;
-      var willOpen = detail.hasAttribute("hidden");
-      if (willOpen) { detail.removeAttribute("hidden"); } else { detail.setAttribute("hidden", ""); }
-      btn.setAttribute("aria-expanded", willOpen ? "true" : "false");
-    });
-  });
-
   // ---- Sub-tabs (Timeline: Flow / Waterfall) ----
   Array.prototype.slice.call(document.querySelectorAll(".subtab")).forEach(function (btn) {
     btn.addEventListener("click", function () {

@@ -317,15 +317,15 @@ details.code-collapse > pre.code { margin-top: 8px; }
 .fx-aside { font-family: var(--font-code); font-size: 11px; color: var(--fg-subtle); }
 .fx-ent { color: var(--sw-turquoise); }
 
-.fx-lat { display: flex; flex-direction: column; gap: 8px; width: 100%; margin: 9px 0; padding: 10px 12px;
-  background: var(--bg-surface); border: 1px solid var(--border); border-left: 3px solid var(--border);
-  border-radius: var(--radius-md); cursor: pointer; text-align: left; font: inherit; color: inherit;
-  transition: background .15s, border-color .15s; }
-.fx.speed-fast .fx-lat { border-left-color: var(--sw-turquoise); }
-.fx.speed-ok .fx-lat { border-left-color: var(--sw-gold); }
-.fx.speed-slow .fx-lat { border-left-color: #ff7a59; }
-.fx-lat:hover { background: var(--bg-raised); border-color: var(--border-strong); }
-.fx-lat:focus-visible { outline: 2px solid var(--sw-blue); outline-offset: 2px; }
+.fx-resp { margin: 9px 0; }
+.fx-big { display: flex; align-items: baseline; gap: 7px; font-family: var(--font-code); font-weight: 700;
+  font-size: 30px; line-height: 1.05; color: var(--fg-default); }
+.fx-big .u { font-size: 13px; font-weight: 500; color: var(--fg-muted); }
+.fx.speed-fast .fx-big { color: var(--sw-turquoise); }
+.fx.speed-slow .fx-big { color: #ff7a59; }
+.fx-resp-label { font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase;
+  color: var(--fg-subtle); }
+.fx-resp-sub { margin-top: 6px; }
 
 .fx-verdict { align-self: flex-start; display: inline-flex; align-items: center; gap: 5px; font-size: 12px;
   font-weight: 500; padding: 2px 10px; border-radius: 999px; border: 1px solid; }
@@ -334,29 +334,17 @@ details.code-collapse > pre.code { margin-top: 8px; }
 .vk-uncertain { color: var(--sw-gold); border-color: rgba(255, 215, 0, .4); background: rgba(255, 215, 0, .08); }
 .vk-forced { color: #ff7a59; border-color: rgba(255, 122, 89, .45); background: rgba(255, 122, 89, .09); }
 
-.fx-barrow { display: flex; align-items: center; gap: 13px; }
-.fx-bar { position: relative; flex: 1; min-width: 0; height: 15px; display: flex; gap: 1px;
-  background: var(--bg-raised); border-radius: 4px; overflow: hidden; }
-.fseg { height: 100%; width: var(--w); border-radius: 1px; }
-.flow.play .fseg { animation: fxgrow .6s cubic-bezier(.2, .85, .25, 1) both; animation-delay: var(--d, 0s); }
-@keyframes fxgrow { from { width: 0; } to { width: var(--w); } }
-.fseg-det { background: var(--sw-blue); }
-.fseg-tool { background: var(--sw-purple); }
-.fseg-model { background: linear-gradient(90deg, rgba(247, 42, 114, .5), rgba(247, 42, 114, .95)); }
-.fx-total { flex-shrink: 0; font-family: var(--font-code); font-weight: 700; font-size: 16px; color: var(--fg-default); }
-.fx-total .u { font-size: 11px; font-weight: 500; color: var(--fg-muted); margin-left: 1px; }
-.fx-zap { color: var(--sw-turquoise); filter: drop-shadow(0 0 4px rgba(64, 224, 208, .6)); }
-.fx-chev { flex-shrink: 0; color: var(--fg-subtle); font-size: 12px; transition: transform .15s; }
-.fx-lat[aria-expanded="true"] .fx-chev { transform: rotate(90deg); }
+.fx-zap { font-size: 22px; color: var(--sw-turquoise); filter: drop-shadow(0 0 5px rgba(64, 224, 208, .6)); }
 
-.fx-detail { padding: 2px 2px 4px; }
-.fx-seglist { display: flex; flex-wrap: wrap; gap: 6px 16px; margin-bottom: 7px; }
-.fx-seg { display: inline-flex; align-items: center; gap: 7px; font-family: var(--font-code);
-  font-size: 11.5px; color: var(--fg-muted); }
-.fx-seg .fdot { width: 9px; height: 9px; border-radius: 2px; flex-shrink: 0; }
-.fx-seg b { color: var(--fg-secondary); font-weight: 600; }
-.fx-cross { font-size: 11.5px; color: var(--fg-subtle); line-height: 1.5; }
-.fx-warn { display: block; margin-top: 3px; color: var(--sw-gold); }
+/* the gap: how the caller's wait was spent — faint = time going by, bright = the agent */
+.fx-gap { display: flex; height: 7px; gap: 1px; margin: 9px 0 5px; border-radius: 4px;
+  overflow: hidden; background: var(--bg-raised); max-width: 540px; }
+.gseg { height: 100%; min-width: 2px; }
+.gseg-wait { background: var(--fg-subtle); opacity: .4; }
+.gseg-tool { background: var(--sw-purple); opacity: .55; }
+.gseg-agent { background: var(--sw-fuchsia); }
+.fx-gap-key { font-family: var(--font-code); font-size: 11px; color: var(--fg-subtle); }
+.fx-gap-key b { color: var(--sw-fuchsia); font-weight: 600; }
 
 /* sub-tabs (Timeline: Flow / Waterfall) */
 .subtabs { display: inline-flex; gap: 2px; padding: 3px; background: var(--bg-raised);

@@ -179,8 +179,8 @@ async def detail(request: Request, call_id: str, src: str = "blessed"):
     flow = enrich.build_flow(payload, analysis)
     flow_scale = max([f["total"] for f in flow] + [1])
     waterfall = enrich.build_waterfall(payload)
-    # Turn-latency summary, off the flow totals (recording truth where matched).
-    _lat = sorted(f["total"] for f in flow)
+    # Summary stats over the agent latency (excludes turn-taking + tool time).
+    _lat = sorted(f["model"] for f in flow)
     breakdown_stats = {
         "avg": round(sum(_lat) / len(_lat)),
         "median": round(statistics.median(_lat)),

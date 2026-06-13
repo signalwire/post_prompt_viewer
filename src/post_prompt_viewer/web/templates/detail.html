@@ -180,26 +180,26 @@
   {% if latency.points %}
   {% if breakdown_stats %}
   <div class="stat-grid" style="margin-bottom:8px">
-    <div class="stat hl"><div class="label">Avg turn latency · user stopped &rarr; AI started</div><div class="value">{{ breakdown_stats.avg | fmt_ms }}</div></div>
+    <div class="stat hl"><div class="label">Avg agent latency</div><div class="value">{{ breakdown_stats.avg | fmt_ms }}</div></div>
     <div class="stat"><div class="label">Median</div><div class="value">{{ breakdown_stats.median | fmt_ms }}</div></div>
     <div class="stat"><div class="label">p95</div><div class="value">{{ breakdown_stats.p95 | fmt_ms }}</div></div>
     <div class="stat"><div class="label">Slowest turn</div><div class="value">{{ breakdown_stats.max | fmt_ms }}</div></div>
   </div>
-  <p class="note" style="margin:0 0 18px">{{ breakdown_stats.rec_count }} of {{ breakdown_stats.count }} turns measured from the recording (silence&rarr;voice); the rest are server estimates.</p>
+  <p class="note" style="margin:0 0 18px">How fast the agent responded once it had the turn &mdash; the turn-taking hold and tool time are excluded. Each turn below shows the caller's full wait and where it went.</p>
   {% endif %}
 
   {# ── Flow: the call as turn-taking + latency, anchored on the recording truth ── #}
   {% set vicon = {'snap':'⚡','instant':'✓','held':'✓','uncertain':'?','forced':'⚠'} %}
   <div class="flow">
     {% for f in flow %}
-    <article class="fx speed-{{ f.speed }}{{ ' seekable' if f.seek is not none }}" style="--d:{{ (loop.index0 * 0.05) | round(2) }}s"{% if f.seek is not none %} data-turn="{{ f.idx }}" data-seek="{{ f.seek }}"{% endif %}>
+    <article class="fx speed-{{ f.speed }}" style="--d:{{ (loop.index0 * 0.05) | round(2) }}s">
       {% if f.human %}
       <div class="fx-caller">
         <span class="fx-who">caller</span>
         <span class="fx-quote">{{ f.human.text or '—' }}</span>
         <span class="fx-aside">
           {%- if f.human.talk_ms %}spoke {{ (f.human.talk_ms / 1000) | round(1) }}s{% endif -%}
-          {%- if f.human.segments and f.human.segments > 1 %} · {{ f.human.segments }} segments{% endif -%}
+          {%- if f.human.segments and f.human.segments > 1 %} · {{ f.human.segments }} parts{% endif -%}
           {%- if f.human.entity %} · <span class="fx-ent">{{ f.human.entity.type }} {{ f.human.entity.value }}</span>{% endif -%}
         </span>
       </div>
@@ -207,29 +207,17 @@
       <div class="fx-caller"><span class="fx-who fx-open">opening</span><span class="fx-aside">the agent spoke first</span></div>
       {% endif %}
 
-      <button class="fx-lat" type="button" aria-expanded="false">
-        {% if f.verdict %}<span class="fx-verdict vk-{{ f.verdict_kind }}">{{ vicon.get(f.verdict_kind, '·') }} {{ f.verdict }}</span>{% endif %}
-        <span class="fx-barrow">
-          <span class="fx-bar" aria-hidden="true">
-            {% if f.det %}<span class="fseg fseg-det" style="--w:{{ (f.det / flow_scale * 100) | round(2) }}%" title="turn detection {{ f.det }}ms"></span>{% endif %}
-            {% if f.tool %}<span class="fseg fseg-tool" style="--w:{{ (f.tool / flow_scale * 100) | round(2) }}%" title="tool {{ f.tool }}ms"></span>{% endif %}
-            {% if f.model %}<span class="fseg fseg-model" style="--w:{{ (f.model / flow_scale * 100) | round(2) }}%" title="model {{ f.model }}ms"></span>{% endif %}
-          </span>
-          <span class="fx-total">{{ f.total }}<span class="u">ms</span>{% if f.speed == 'fast' %} <span class="fx-zap">⚡</span>{% endif %}</span>
-          <span class="fx-chev" aria-hidden="true">▸</span>
-        </span>
-      </button>
-
-      <div class="fx-detail" hidden>
-        <div class="fx-seglist">
-          {% if f.det %}<span class="fx-seg"><i class="fdot fseg-det"></i>turn detection <b>{{ f.det }}ms</b>{% if f.human and f.human.eot_basis %} · {{ f.human.eot_basis }}{% if f.human.eot_conf is not none %} {{ '%.0f'|format(f.human.eot_conf) }}%{% endif %}{% endif %}</span>{% endif %}
-          {% if f.tool %}<span class="fx-seg"><i class="fdot fseg-tool"></i>tool · {{ f.tool_names | join(' + ') }} <b>{{ f.tool }}ms</b></span>{% endif %}
-          <span class="fx-seg"><i class="fdot fseg-model"></i>model <b>{{ f.model }}ms</b>{% if f.ttft %} · TTFT {{ f.ttft }}ms{% endif %}{% if f.audio %} · first audio {{ f.audio }}ms{% endif %}</span>
+      <div class="fx-resp">
+        <div class="fx-big">{{ f.model }}<span class="u">ms</span>{% if f.speed == 'fast' %} <span class="fx-zap">⚡</span>{% endif %}<span class="fx-resp-label">agent latency</span></div>
+        {% if f.verdict %}<div class="fx-resp-sub"><span class="fx-verdict vk-{{ f.verdict_kind }}">{{ vicon.get(f.verdict_kind, '·') }} {{ f.verdict }}</span></div>{% endif %}
+        {% if f.total > f.model %}
+        <div class="fx-gap" title="how the caller's {{ (f.total / 1000) | round(1) }}s wait was spent — only the bright slice is the agent">
+          {% if f.det %}<span class="gseg gseg-wait" style="flex:{{ f.det }}"></span>{% endif %}
+          {% if f.tool %}<span class="gseg gseg-tool" style="flex:{{ f.tool }}"></span>{% endif %}
+          <span class="gseg gseg-agent" style="flex:{{ f.model }}"></span>
         </div>
-        <div class="fx-cross">
-          total from {{ 'the recording — silence &rarr; first agent audio' if f.total_source == 'recording' else 'a server estimate (no recording match)' }}.
-          {% if f.diverges %}<span class="fx-warn">⚠ the server's acoustic_latency claimed {{ f.acoustic }}ms here — the recording measured {{ f.wav }}ms. Trust the recording.</span>{% endif %}
-        </div>
+        <div class="fx-gap-key">caller waited {{ (f.total / 1000) | round(1) }}s &mdash; {% if f.det %}held {{ (f.det / 1000) | round(1) }}s for them &middot; {% endif %}{% if f.tool %}{{ f.tool_names | join('+') }} {{ (f.tool / 1000) | round(1) }}s &middot; {% endif %}<b>agent {{ (f.model / 1000) | round(1) }}s</b></div>
+        {% endif %}
       </div>
 
       <div class="fx-ai">

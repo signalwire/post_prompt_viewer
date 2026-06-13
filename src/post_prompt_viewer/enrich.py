@@ -715,7 +715,7 @@ def build_flow(payload: dict, analysis: dict = None) -> list:
             "human": human,
             "total": round(total),
             "total_source": "recording" if wav else "server",
-            "speed": _speed(total),
+            "speed": _speed(model_seg),
             "det": round(det_seg),
             "tool": round(tool_seg),
             "tool_names": tool_names,
