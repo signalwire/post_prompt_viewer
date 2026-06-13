@@ -213,6 +213,11 @@
 
 {# ===================== LATENCY ===================== #}
 <section class="tab-panel" id="panel-latency" role="tabpanel">
+  <div class="subtabs">
+    <button class="subtab active" data-sub="flow" type="button">Flow</button>
+    <button class="subtab" data-sub="wfall" type="button">Waterfall <span class="tab-count">{{ waterfall.events | length }}</span></button>
+  </div>
+  <div class="sub-panel active" data-subpanel="flow">
   {% if latency.points %}
   {% if breakdown_stats %}
   <div class="stat-grid" style="margin-bottom:8px">
@@ -342,6 +347,28 @@
   {% else %}
   <p class="note">No per-turn latency was reported for this call.</p>
   {% endif %}
+  </div>{# /sub-flow #}
+
+  <div class="sub-panel" data-subpanel="wfall">
+    {% if waterfall.events %}
+    <p class="note" style="margin:0 0 12px">Every event in the call on one time axis &mdash; {{ (waterfall.span / 1000) | round(1) }}s total. Click a row for its data.</p>
+    <div class="wfall">
+      <div class="wf-axis"><span>0s</span><span>{{ (waterfall.span / 1000) | round(1) }}s</span></div>
+      {% for ev in waterfall.events %}
+      <div class="wf-row lane-{{ ev.lane }}" role="button" tabindex="0">
+        <div class="wf-label" title="{{ ev.label }}">{{ ev.label }}</div>
+        <div class="wf-track">
+          <span class="wf-bar" title="{{ ev.label }}{% if ev.dur %} &middot; {{ ev.dur }}ms{% endif %} @ +{{ (ev.off / 1000) | round(1) }}s"
+                style="left:{{ (ev.off / waterfall.span * 100) | round(3) }}%; width:{{ ([ev.dur / waterfall.span * 100, 0.7] | max) | round(3) }}%"></span>
+        </div>
+      </div>
+      <div class="wf-detail" hidden>
+        {% for k, v in ev.details.items() %}{% if v not in (None, '') %}<span class="chip">{{ k }} <b>{{ v | string | truncate(48, true) }}</b></span>{% endif %}{% endfor %}
+      </div>
+      {% endfor %}
+    </div>
+    {% else %}<p class="note">No timeline events for this call.</p>{% endif %}
+  </div>
 </section>
 
 {# ===================== FUNCTIONS ===================== #}

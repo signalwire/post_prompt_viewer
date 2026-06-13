@@ -868,6 +868,62 @@ def build_flow(payload: dict, analysis: dict = None) -> list:
     return out
 
 
+def build_waterfall(payload: dict) -> dict:
+    """Every call_timeline event on a real time axis — the "every second" debug
+    view. Returns ``{events: [...], span}`` where each event has a lane, an offset
+    (ms from call start) and a duration (ms) for the bar, plus its metadata.
+    """
+    events = build_timeline(payload)
+    tss = [e["ts"] for e in events if e.get("ts")]
+    if not tss:
+        return {"events": [], "span": 1}
+    start = min(tss)
+    span = max(1, round((max(tss) - start) / 1000))
+    lanes = {
+        "user_input": "human", "ai_response": "ai", "tool_result": "tool",
+        "function_call": "tool", "gather_start": "gather", "gather_question": "gather",
+        "gather_answer": "gather", "step_change": "step", "context_enter": "step",
+        "session_start": "meta", "session_end": "meta",
+    }
+    out = []
+    for e in events:
+        ts = e.get("ts")
+        if not ts:
+            continue
+        d = e.get("details") or {}
+        etype = e["type"]
+        off = (ts - start) / 1000
+        dur = 0
+        if etype == "user_input":
+            st, en = d.get("start_timestamp"), d.get("end_timestamp")
+            try:
+                if st and en:
+                    off = (float(st) - start) / 1000
+                    dur = (float(en) - float(st)) / 1000
+            except Exception:
+                pass
+        elif etype == "tool_result":
+            ex = d.get("execution_latency") or d.get("latency")
+            if isinstance(ex, (int, float)):
+                off, dur = max(0, off - ex), ex
+        elif etype == "ai_response":
+            dur = d.get("audio_latency") or 0
+        elif etype == "function_call":
+            dur = d.get("duration_ms") or 0
+        out.append({
+            "type": etype,
+            "lane": lanes.get(etype, "meta"),
+            "label": e["label"],
+            "ts_str": e["ts_str"],
+            "elapsed": e["elapsed"],
+            "off": round(max(0, off)),
+            "dur": round(dur),
+            "details": d,
+        })
+    out.sort(key=lambda ev: ev["off"])
+    return {"events": out, "span": span}
+
+
 # --------------------------------------------------------------------------- #
 # Functions (the Functions tab — from swaig_log)
 # --------------------------------------------------------------------------- #

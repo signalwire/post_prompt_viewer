@@ -397,6 +397,36 @@ details.code-collapse > pre.code { margin-top: 8px; }
 .fx-seg b { color: var(--fg-secondary); font-weight: 600; }
 .fx-cross { font-size: 11.5px; color: var(--fg-subtle); line-height: 1.5; }
 .fx-warn { display: block; margin-top: 3px; color: var(--sw-gold); }
+
+/* sub-tabs (Timeline: Flow / Waterfall) */
+.subtabs { display: inline-flex; gap: 2px; padding: 3px; background: var(--bg-raised);
+  border-radius: var(--radius-md); margin-bottom: 16px; }
+.subtab { font: inherit; font-size: 13px; color: var(--fg-muted); background: transparent; border: 0;
+  padding: 5px 14px; border-radius: var(--radius-sm); cursor: pointer; }
+.subtab:hover { color: var(--fg-secondary); }
+.subtab.active { color: var(--fg-default); background: var(--bg-surface); }
+.subtab .tab-count { margin-left: 5px; }
+.sub-panel { display: none; }
+.sub-panel.active { display: block; }
+
+/* waterfall (every event on a time axis) */
+.wf-axis { display: flex; justify-content: space-between; font-family: var(--font-code); font-size: 10.5px;
+  color: var(--fg-subtle); padding: 0 4px 5px 196px; border-bottom: 1px solid var(--border); margin-bottom: 4px; }
+.wf-row { display: grid; grid-template-columns: 186px 1fr; gap: 10px; align-items: center;
+  padding: 3px 6px; border-radius: 6px; cursor: pointer; }
+.wf-row:hover { background: var(--bg-surface); }
+.wf-label { font-family: var(--font-code); font-size: 11.5px; color: var(--fg-secondary); white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis; padding-left: 10px; border-left: 3px solid var(--border); }
+.wf-track { position: relative; height: 16px; border-radius: 3px;
+  background-image: linear-gradient(90deg, var(--border) 1px, transparent 1px); background-size: 10% 100%; }
+.wf-bar { position: absolute; top: 2px; bottom: 2px; min-width: 3px; border-radius: 2px; opacity: .9; }
+.lane-human .wf-label { border-left-color: var(--sw-blue); } .lane-human .wf-bar { background: var(--sw-blue); }
+.lane-ai .wf-label { border-left-color: var(--sw-fuchsia); } .lane-ai .wf-bar { background: var(--sw-fuchsia); }
+.lane-tool .wf-label { border-left-color: var(--sw-purple); } .lane-tool .wf-bar { background: var(--sw-purple); }
+.lane-gather .wf-label { border-left-color: var(--sw-turquoise); } .lane-gather .wf-bar { background: var(--sw-turquoise); }
+.lane-step .wf-label { border-left-color: var(--sw-gold); } .lane-step .wf-bar { background: var(--sw-gold); }
+.lane-meta .wf-label { border-left-color: var(--fg-subtle); } .lane-meta .wf-bar { background: var(--fg-subtle); }
+.wf-detail { padding: 4px 0 9px 196px; display: flex; flex-wrap: wrap; gap: 6px; }
 .seg-ttft { background: rgba(247, 42, 114, 0.40); }
 .seg-model_utt { background: rgba(247, 42, 114, 0.66); }
 .seg-utt_audio { background: rgba(247, 42, 114, 0.92); }

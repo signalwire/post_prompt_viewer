@@ -195,6 +195,7 @@ async def detail(request: Request, call_id: str, src: str = "blessed"):
     } if _lat else None
     flow = enrich.build_flow(payload, analysis)
     flow_scale = max([f["total"] for f in flow] + [1])
+    waterfall = enrich.build_waterfall(payload)
     source = "raw" if src == "raw" else "blessed"
     transcript = enrich.build_transcript(payload, source=source)
     # Sorted index of seekable spoken turns, for prev/next + current-turn highlight.
@@ -233,5 +234,6 @@ async def detail(request: Request, call_id: str, src: str = "blessed"):
             "breakdown_stats": breakdown_stats,
             "flow": flow,
             "flow_scale": flow_scale,
+            "waterfall": waterfall,
         },
     )

@@ -173,4 +173,28 @@
       btn.setAttribute("aria-expanded", willOpen ? "true" : "false");
     });
   });
+
+  // ---- Sub-tabs (Timeline: Flow / Waterfall) ----
+  Array.prototype.slice.call(document.querySelectorAll(".subtab")).forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      var sub = btn.dataset.sub;
+      var scope = btn.closest(".tab-panel") || document;
+      Array.prototype.slice.call(scope.querySelectorAll(".subtab")).forEach(function (b) {
+        b.classList.toggle("active", b === btn);
+      });
+      Array.prototype.slice.call(scope.querySelectorAll(".sub-panel")).forEach(function (p) {
+        p.classList.toggle("active", p.dataset.subpanel === sub);
+      });
+    });
+  });
+
+  // ---- Waterfall: click an event row to expand its metadata ----
+  Array.prototype.slice.call(document.querySelectorAll(".wf-row")).forEach(function (row) {
+    row.addEventListener("click", function () {
+      var detail = row.nextElementSibling;
+      if (!detail || !detail.classList.contains("wf-detail")) return;
+      if (detail.hasAttribute("hidden")) detail.removeAttribute("hidden");
+      else detail.setAttribute("hidden", "");
+    });
+  });
 })();
