@@ -5,6 +5,7 @@
   <h1>Conversations</h1>
   <div style="display:flex; align-items:center; gap:14px">
     <span class="count">{{ total }} call{{ '' if total == 1 else 's' }}</span>
+    {% if rows %}<button class="btn secondary" id="select-toggle" type="button">Select</button>{% endif %}
     <button class="btn" id="upload-btn" data-upload-url="{{ url_for('upload') }}">Upload JSON</button>
     <input type="file" id="upload-input" accept="application/json,.json" hidden>
   </div>
@@ -41,6 +42,14 @@
   {% endif %}
 </form>
 
+{% if rows %}
+<div id="select-bar" hidden>
+  <span id="sel-count">0 selected</span>
+  <button class="btn danger" id="sel-delete" type="button" disabled>Delete</button>
+  <button class="btn secondary" id="sel-cancel" type="button">Cancel</button>
+</div>
+{% endif %}
+
 {% macro sorth(key, label) %}
   {% set active = filters.sort == key %}
   {% set nd = 'asc' if (active and filters.dir == 'desc') else 'desc' %}
@@ -49,9 +58,10 @@
 
 {% if rows %}
 <div class="table-wrap">
-  <table class="calls">
+  <table class="calls" data-delete-url="{{ url_for('calls_delete') }}">
     <thead>
       <tr>
+        <th class="sel"></th>
         <th>{{ sorth('start_date', 'Date') }}</th>
         <th>Caller</th>
         <th>App</th>
@@ -63,7 +73,8 @@
     </thead>
     <tbody>
       {% for r in rows %}
-      <tr onclick="location.href='{{ url_for('detail', call_id=r.call_id) }}'">
+      <tr data-href="{{ url_for('detail', call_id=r.call_id) }}" data-call-id="{{ r.call_id }}">
+        <td class="sel"></td>
         <td class="num">{{ (r.start_date or r.received_at) | fmt_dt }}</td>
         <td>
           <div class="caller">{{ r.caller_name or 'Unknown caller' }}</div>

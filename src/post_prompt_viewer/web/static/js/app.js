@@ -199,4 +199,75 @@
   document.addEventListener("mouseout", function (e) {
     if (e.target.closest("[data-tip]")) tip.setAttribute("hidden", "");
   });
+
+  // ---- Index: select-mode + bulk delete ----
+  var calls = document.querySelector("table.calls");
+  var selToggle = document.getElementById("select-toggle");
+  if (calls && selToggle) {
+    var selBar = document.getElementById("select-bar");
+    var selCount = document.getElementById("sel-count");
+    var selDelete = document.getElementById("sel-delete");
+    var selCancel = document.getElementById("sel-cancel");
+    var trRows = Array.prototype.slice.call(calls.querySelectorAll("tbody tr"));
+    var selecting = false, anchor = null;
+
+    var chosen = function () {
+      return trRows.filter(function (r) { return r.classList.contains("selected"); });
+    };
+    var refresh = function () {
+      var n = chosen().length;
+      selCount.textContent = n + " selected";
+      selDelete.disabled = n === 0;
+      selDelete.textContent = n ? "Delete " + n : "Delete";
+    };
+    var enter = function () {
+      selecting = true; calls.classList.add("selecting");
+      selBar.removeAttribute("hidden"); selToggle.classList.add("active");
+      selToggle.textContent = "Done"; refresh();
+    };
+    var leave = function () {
+      selecting = false; calls.classList.remove("selecting");
+      selBar.setAttribute("hidden", ""); selToggle.classList.remove("active");
+      selToggle.textContent = "Select"; anchor = null;
+      trRows.forEach(function (r) { r.classList.remove("selected"); });
+    };
+    selToggle.addEventListener("click", function () { selecting ? leave() : enter(); });
+    selCancel.addEventListener("click", leave);
+
+    calls.addEventListener("click", function (e) {
+      if (e.target.closest("a, button, input, summary")) return;
+      var tr = e.target.closest("tbody tr");
+      if (!tr) return;
+      if (!selecting) {
+        var href = tr.getAttribute("data-href");
+        if (href) location.href = href;
+        return;
+      }
+      var idx = trRows.indexOf(tr);
+      if (e.shiftKey && anchor !== null) {
+        var lo = Math.min(anchor, idx), hi = Math.max(anchor, idx);
+        var want = !tr.classList.contains("selected");
+        for (var i = lo; i <= hi; i++) trRows[i].classList.toggle("selected", want);
+      } else {
+        tr.classList.toggle("selected");
+      }
+      anchor = idx;
+      refresh();
+    });
+
+    selDelete.addEventListener("click", function () {
+      var ids = chosen().map(function (r) { return r.getAttribute("data-call-id"); });
+      if (!ids.length) return;
+      if (!window.confirm("Delete " + ids.length + " call" + (ids.length > 1 ? "s" : "") +
+          "? This cannot be undone.")) return;
+      selDelete.disabled = true; selDelete.textContent = "Deleting…";
+      fetch(calls.getAttribute("data-delete-url"), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ ids: ids }),
+      })
+        .then(function (r) { if (r.ok) { location.reload(); } else { window.alert("Delete failed."); refresh(); } })
+        .catch(function () { window.alert("Delete failed."); refresh(); });
+    });
+  }
 })();

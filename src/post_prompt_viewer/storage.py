@@ -145,6 +145,20 @@ def save_call(payload: dict, received_at_us: Optional[int] = None) -> str:
     return call_id
 
 
+def delete_call(call_id: str) -> Optional[dict]:
+    """Delete a call and its FTS + recording rows. Returns the (now-removed)
+    recording row so the caller can clean up cached audio, an empty dict when
+    there was no recording row, or None if the call_id is unknown."""
+    with _connect() as conn:
+        if not conn.execute("SELECT 1 FROM calls WHERE call_id = ?", (call_id,)).fetchone():
+            return None
+        rec = conn.execute("SELECT * FROM recordings WHERE call_id = ?", (call_id,)).fetchone()
+        conn.execute("DELETE FROM calls WHERE call_id = ?", (call_id,))
+        conn.execute("DELETE FROM calls_fts WHERE call_id = ?", (call_id,))
+        conn.execute("DELETE FROM recordings WHERE call_id = ?", (call_id,))
+    return dict(rec) if rec else {}
+
+
 def get_call(call_id: str) -> Optional[dict]:
     """Return the index columns plus the parsed payload, or None."""
     with _connect() as conn:

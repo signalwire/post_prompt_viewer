@@ -48,6 +48,22 @@ def test_recordings_roundtrip(sample):
     assert storage.pending_recordings() == []
 
 
+def test_delete_call(sample):
+    storage.init_db()
+    cid = storage.save_call(sample)
+    assert storage.count_calls() == 1
+    assert storage.list_calls(q="billing")          # FTS row present
+    assert storage.get_recording(cid) is not None    # recording row seeded
+
+    rec = storage.delete_call(cid)
+    assert rec is not None                            # returned the removed recording row
+    assert storage.count_calls() == 0
+    assert storage.get_call(cid) is None
+    assert storage.get_recording(cid) is None
+    assert storage.list_calls(q="billing") == []      # FTS cleaned up too
+    assert storage.delete_call(cid) is None           # deleting an unknown id is a no-op
+
+
 def test_summaries():
     storage.init_db()
     storage.append_summary("c1", "first")

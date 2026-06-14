@@ -856,6 +856,41 @@ def build_trace(payload: dict) -> list:
     return out
 
 
+_WAVE_MS_LABELS = {"turn_decided": "EOT", "first_token": "token", "first_audio": "audio"}
+
+
+def wave_markers(payload: dict) -> list:
+    """Recording-relative markers for the waveform overlay: SWAIG tool spans and
+    the key per-turn pipeline stamps, so the milestones scroll with the audio.
+    ``t`` / ``dur`` are seconds from the start of the recording.
+    """
+    rs = _record_start(payload)
+    if not rs:
+        return []
+    out = []
+    for e in payload.get("call_log") or []:
+        role = e.get("role")
+        if role == "tool":
+            st, en = e.get("start_timestamp"), e.get("end_timestamp")
+            try:
+                t0 = (float(st) - rs) / 1e6 if st else None
+                dur = (float(en) - float(st)) / 1e6 if (st and en) else 0
+            except (TypeError, ValueError):
+                t0, dur = None, 0
+            if t0 is not None and t0 >= 0:
+                out.append({"t": round(t0, 3), "dur": round(max(0, dur), 3),
+                            "label": "ƒ " + (e.get("function_name") or "function"), "kind": "tool"})
+        elif role in ("assistant", "assistant-manual") and e.get("content"):
+            stamps = _stamps_of(e)
+            for name, lab in _WAVE_MS_LABELS.items():
+                if name in stamps:
+                    t = (stamps[name] - rs) / 1e6
+                    if t >= 0:
+                        out.append({"t": round(t, 3), "dur": 0, "label": lab, "kind": name})
+    out.sort(key=lambda m: m["t"])
+    return out
+
+
 def build_waterfall(payload: dict) -> dict:
     """Every call_timeline event on a real time axis — the "every second" debug
     view. Returns ``{events: [...], span}`` where each event has a lane, an offset

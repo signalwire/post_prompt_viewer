@@ -89,6 +89,7 @@ def _path_url(name, **params):
         "recording_audio": f"/api/recording/{cid}/audio",
         "trigger_analysis": f"/api/recording/{cid}/analyze",
         "call_payload": f"/api/call/{cid}",
+        "calls_delete": "/api/calls/delete",
     }
     return f"{prefix}{table[name]}"
 
@@ -179,6 +180,7 @@ async def detail(request: Request, call_id: str, src: str = "blessed"):
     waterfall = enrich.build_waterfall(payload)
     trace = enrich.build_trace(payload)
     events = enrich.build_events(payload)
+    wave_markers = enrich.wave_markers(payload)
     # Summary stats over the per-turn mouth-to-ear latency.
     _tl = sorted(r["hero_ms"] for r in trace if r.get("hero_ms"))
     turn_stats = {
@@ -225,5 +227,6 @@ async def detail(request: Request, call_id: str, src: str = "blessed"):
             "trace": trace,
             "turn_stats": turn_stats,
             "events": events,
+            "wave_markers": wave_markers,
         },
     )
