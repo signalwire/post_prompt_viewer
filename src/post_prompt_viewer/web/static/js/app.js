@@ -173,4 +173,30 @@
       else detail.setAttribute("hidden", "");
     });
   });
+
+  // ---- Instant styled tooltips for [data-tip] (trace segments + milestones) ----
+  var tip = document.createElement("div");
+  tip.className = "ppv-tip";
+  tip.setAttribute("hidden", "");
+  document.body.appendChild(tip);
+  function showTip(el) {
+    tip.textContent = el.getAttribute("data-tip");
+    tip.removeAttribute("hidden");
+    var r = el.getBoundingClientRect();
+    var w = tip.offsetWidth, h = tip.offsetHeight;
+    var vw = document.documentElement.clientWidth;
+    var x = r.left + r.width / 2 - w / 2;
+    x = Math.max(6, Math.min(x, vw - w - 6));
+    var y = r.top - h - 9;
+    if (y < 4) y = r.bottom + 9; // flip below if no room above
+    tip.style.left = (x + window.scrollX) + "px";
+    tip.style.top = (y + window.scrollY) + "px";
+  }
+  document.addEventListener("mouseover", function (e) {
+    var el = e.target.closest("[data-tip]");
+    if (el) showTip(el);
+  });
+  document.addEventListener("mouseout", function (e) {
+    if (e.target.closest("[data-tip]")) tip.setAttribute("hidden", "");
+  });
 })();

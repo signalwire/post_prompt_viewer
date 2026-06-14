@@ -125,6 +125,17 @@ def _loads(maybe_json: Any) -> Any:
         return maybe_json
 
 
+_LN_DIRECTIVE = re.compile(r"~LN\([^)]*\)-;\s*")
+
+
+def clean_text(value: Any) -> Any:
+    """Strip inline TTS language directives like ``~LN(English)-;`` from text;
+    pass non-strings through unchanged."""
+    if not isinstance(value, str):
+        return value
+    return _LN_DIRECTIVE.sub("", value)
+
+
 _UNSAFE_ID = re.compile(r"[^A-Za-z0-9_.\-]")
 
 
@@ -259,6 +270,7 @@ def build_transcript(payload: dict, source: str = "blessed") -> list:
     log_key = "raw_call_log" if source == "raw" else "call_log"
     entries = payload.get(log_key) or payload.get("call_log") or []
     record_start = _record_start(payload)
+    barge_idx = _barge_index(payload)
 
     turns = []
     last_ts = None
@@ -288,7 +300,7 @@ def build_transcript(payload: dict, source: str = "blessed") -> list:
     for idx, e in enumerate(entries):
         role = e.get("role")
         ts = e.get("timestamp")
-        content = e.get("content")
+        content = clean_text(e.get("content"))
 
         turn = {
             "idx": idx,
@@ -307,12 +319,9 @@ def build_transcript(payload: dict, source: str = "blessed") -> list:
         if role in {"assistant", "assistant-manual"} and content:
             turn["speaker"] = "ai"
             turn["latency"] = _latency_tiers(e)
-            if e.get("barged"):
-                turn["barge"] = {
-                    "elapsed_ms": e.get("barge_elapsed_ms"),
-                    "heard": e.get("text_heard_approx"),
-                    "total": e.get("text_spoken_total"),
-                }
+            barge = barge_idx.get((content or "").strip())
+            if barge:
+                turn["barge"] = barge
             perf = _match_perf(content)
             if perf:
                 turn["perf"] = perf
@@ -421,7 +430,7 @@ def build_timeline(payload: dict) -> list:
             "elapsed": fmt_elapsed(last_ts, ts) if (ts and last_ts) else "",
             "type": etype,
             "label": EVENT_LABELS.get(etype, etype),
-            "details": {k: v for k, v in details.items() if v not in (None, "")},
+            "details": {k: clean_text(v) for k, v in details.items() if v not in (None, "")},
         })
         if ts:
             last_ts = ts
@@ -554,46 +563,6 @@ def _pos(value):
     return value if isinstance(value, (int, float)) and value > 0 else None
 
 
-def _preceding_tools(call_log: list, idx: int):
-    """SWAIG tool calls that ran for AI turn ``idx``.
-
-    Returns ``(total_execution_ms, [function_names])`` from the ``tool`` result
-    entries between this spoken turn and the user turn that triggered it (same
-    boundary as :func:`_preceding_user_entry`).
-    """
-    total_ms = 0
-    names = []
-    for j in range(idx - 1, -1, -1):
-        e = call_log[j]
-        role = e.get("role")
-        if role == "tool":
-            ms = e.get("execution_latency")
-            if not isinstance(ms, (int, float)):
-                ms = e.get("function_latency") or e.get("latency")
-            if isinstance(ms, (int, float)) and ms > 0:
-                total_ms += ms
-            if e.get("function_name"):
-                names.append(e["function_name"])
-        elif role == "user":
-            break
-        elif role == "assistant" and e.get("content"):
-            break
-    names.reverse()
-    return (round(total_ms), names)
-
-
-def _preceding_user_entry(call_log: list, idx: int):
-    """The user turn that triggered AI turn ``idx`` (skipping tool/filler/thinking)."""
-    for j in range(idx - 1, -1, -1):
-        e = call_log[j]
-        role = e.get("role")
-        if role == "user":
-            return e
-        if role == "assistant" and e.get("content"):
-            break
-    return None
-
-
 def _speed(ms):
     """Speed bucket for colour/feel: fast ⚡ / ok / slow."""
     if not isinstance(ms, (int, float)):
@@ -634,101 +603,256 @@ def _verdict(user_entry: dict, det_ms: float):
     return (None, None)
 
 
-def build_flow(payload: dict, analysis: dict = None) -> list:
-    """Per-exchange flow for the Timeline tab: each AI response paired with the
-    turn it answered and a latency split that sums to the **recording truth**.
+# Canonical wall-clock pipeline events for an AI turn, in causal order. Each is
+# read from the stamps_us block, falling back to the matching *_wall_us field.
+# They all share one clock (switch_time_now), so they lay out on a single axis.
+_PIPELINE_EVENTS = [
+    ("speech_start",    "speech_start_wall_us",    "caller started speaking"),
+    ("last_word_end",   "last_word_end_wall_us",   "caller's last word"),
+    ("turn_decided",    "turn_decided_wall_us",    "end-of-turn decided"),
+    ("status_pushed",   "status_pushed_wall_us",   "status pushed"),
+    ("request_detect",  None,                      "LLM request dispatched"),
+    ("first_token",     None,                      "first LLM token"),
+    ("first_utterance", None,                      "first TTS utterance"),
+    ("first_audio",     None,                      "first audio to caller"),
+]
 
-    Latency = ``turn detection`` (the DG hold, ``commit_latency_ms``) + ``tool``
-    (SWAIG ``execution_latency``) + ``model`` (everything else up to first audio).
-    The total is the wav caliper when the recording matched, else the server's
-    ``acoustic_latency`` (flagged). No invented residual — ``model`` absorbs the
-    rest of the measured gap and is labelled as the model, not as grey.
+
+def _word_count(text: Optional[str]) -> Optional[int]:
+    return len(text.split()) if isinstance(text, str) and text.strip() else None
+
+
+def _barge(entry: dict) -> Optional[dict]:
+    """If the caller barged in over this AI turn: when, and how much was heard.
+
+    ``text_heard_approx`` is the portion the caller actually heard before cutting
+    in; ``text_spoken_total`` is the full reply the agent intended. We surface the
+    fraction heard and the unheard remainder (when ``heard`` is a clean prefix).
+    """
+    if not entry.get("barged"):
+        return None
+    heard = entry.get("text_heard_approx")
+    total = entry.get("text_spoken_total")
+    hw, tw = _word_count(heard), _word_count(total)
+    unheard = None
+    if isinstance(heard, str) and isinstance(total, str) and total.startswith(heard):
+        unheard = total[len(heard):]
+    return {
+        "elapsed_ms": _pos(entry.get("barge_elapsed_ms")),
+        "heard": heard,
+        "total": total,
+        "unheard": unheard,
+        "heard_words": hw,
+        "total_words": tw,
+        "pct_heard": round(100 * hw / tw) if (hw and tw) else None,
+    }
+
+
+def _barge_index(payload: dict) -> dict:
+    """Map spoken text -> barge info. The barge fields ride the ``raw_call_log`` /
+    ``call_timeline`` entries (the "raw_array"), NOT the collapsed ``call_log``, so
+    we index them by the spoken text to reattach them to the blessed turns. Keyed
+    by ``text_spoken_total`` / ``content`` (stripped), which match the blessed
+    assistant ``content`` verbatim.
+    """
+    index = {}
+    sources = list(payload.get("raw_call_log") or [])
+    sources += [e for e in (payload.get("call_timeline") or []) if e.get("type") == "ai_response"]
+    for e in sources:
+        if not isinstance(e, dict) or not e.get("barged"):
+            continue
+        info = _barge(e)
+        if not info:
+            continue
+        for key in (e.get("text_spoken_total"), e.get("content"), e.get("text_heard_approx")):
+            if isinstance(key, str) and key.strip():
+                index.setdefault(key.strip(), info)
+    return index
+
+
+# Milestone -> visual category (colour) and human label, for the trace timeline.
+_MILESTONE_CAT = {
+    "speech_start": "caller", "last_word_end": "caller",
+    "turn_decided": "detect", "status_pushed": "detect",
+    "request_detect": "llm", "first_token": "llm",
+    "first_utterance": "tts", "first_audio": "audio",
+    "filler_audio": "filler", "tool_start": "tool", "tool_end": "tool",
+}
+_MILESTONE_LABEL = {
+    "speech_start": "caller started", "last_word_end": "caller's last word",
+    "turn_decided": "turn detected", "status_pushed": "status pushed",
+    "request_detect": "LLM dispatched", "first_token": "first token",
+    "first_utterance": "first utterance", "first_audio": "first audio",
+    "filler_audio": "filler audio", "tool_start": "function start", "tool_end": "function done",
+}
+# Label for the span *leading into* each milestone (the gap before it).
+_GAP_LABEL = {
+    "last_word_end": "caller speaking", "turn_decided": "end-of-turn hold",
+    "status_pushed": "queue push", "filler_audio": "to filler audio",
+    "tool_start": "dispatch", "tool_end": "function", "request_detect": "tool / wait",
+    "first_token": "LLM first token", "first_utterance": "TTS", "first_audio": "audio out",
+}
+
+
+def _stamps_of(entry: dict) -> dict:
+    """Wall-clock stamps present on a call_log entry (stamps_us + *_wall_us)."""
+    su = entry.get("stamps_us") or {}
+    out = {}
+    for name, wall_key, _label in _PIPELINE_EVENTS:
+        v = su.get(name)
+        if v is None and wall_key:
+            v = entry.get(wall_key)
+        if isinstance(v, (int, float)) and v > 0:
+            out[name] = int(v)
+    return out
+
+
+def build_trace(payload: dict) -> list:
+    """One trace per exchange (caller turn → AI reply), the whole conversation.
+
+    Every wall-clock milestone is mapped onto a single time axis; the gaps
+    between them are the labelled breakdown; SWAIG calls are spans you can open
+    for args + result; and the headline is the mouth-to-ear turn latency (the
+    caller's last word → first audio). Renders every turn, stamps or not.
     """
     call_log = payload.get("call_log") or []
     record_start = _record_start(payload)
-    wavmap = {}
-    if analysis:
-        try:
-            for p in align_latency(payload, analysis).get("pairs", []):
-                if p.get("text"):
-                    wavmap[p["text"]] = p["wav_ms"]
-        except Exception:
-            pass
+    funcs = build_functions(payload)
+    ppd = payload.get("post_prompt_data") or {}
+    summary_texts = {(ppd.get(k) or "").strip() for k in ("raw", "substituted")} - {""}
 
-    out = []
-    for idx, e in enumerate(call_log):
-        if e.get("role") != "assistant" or not e.get("content"):
-            continue
-        text = (e.get("content") or "").strip()
-        aud = _pos(e.get("audio_latency"))
-        lat, utt = _pos(e.get("latency")), _pos(e.get("utterance_latency"))
-        ac = _pos(e.get("acoustic_latency"))
-        wav = wavmap.get(text) or wavmap.get(text[:80])
+    # Group the log into exchanges: a user turn and the AI activity it triggered
+    # (fillers, tool results, the spoken reply) up to the next user turn. AI turns
+    # before any user turn (the greeting) form a leading exchange with no caller.
+    # system / system-log entries (step changes, session end) don't match any branch
+    # so they never perturb grouping; the post-call summary is not a turn either.
+    groups, cur = [], None
+    for e in call_log:
+        role = e.get("role")
+        if role == "user" and e.get("content"):
+            if cur:
+                groups.append(cur)
+            cur = {"user": e, "ai": [], "tools": []}
+        elif role in ("assistant", "assistant-manual") and e.get("content"):
+            if (e.get("content") or "").strip() in summary_texts:
+                continue
+            cur = cur or {"user": None, "ai": [], "tools": []}
+            cur["ai"].append(e)
+        elif role == "tool":
+            cur = cur or {"user": None, "ai": [], "tools": []}
+            cur["tools"].append(e)
+    if cur:
+        groups.append(cur)
 
-        user_entry = _preceding_user_entry(call_log, idx)
-        tool_ms, tool_names = _preceding_tools(call_log, idx)
-        timing = (user_entry or {}).get("timing") or {}
-        det = timing.get("commit_latency_ms")
-        if not isinstance(det, (int, float)):
-            det = timing.get("hold_ms")
-        det = det if isinstance(det, (int, float)) else 0
+    out, fpi = [], 0
+    for g in groups:
+        u = g["user"]
+        pts = []  # (t_us, name, cat)
+        if u:
+            su = _stamps_of(u)
+            for n in ("speech_start", "last_word_end", "turn_decided", "status_pushed"):
+                if n in su:
+                    pts.append((su[n], n, _MILESTONE_CAT[n]))
+        reply = None
+        for ai in g["ai"]:
+            su = _stamps_of(ai)
+            if ai.get("role") == "assistant-manual":
+                if "first_audio" in su:
+                    pts.append((su["first_audio"], "filler_audio", "filler"))
+            else:
+                reply = ai
+                for n in ("request_detect", "first_token", "first_utterance", "first_audio"):
+                    if n in su:
+                        pts.append((su[n], n, _MILESTONE_CAT[n]))
 
-        # total = recording truth, else server acoustic, else eos+audio, else audio
-        total = wav or ac or ((_pos(e.get("eos_to_push_latency")) or 0) + (aud or 0)) or aud
-        if not total:
-            continue
-        # Reserve the measured model→audio time as a floor so the model band is
-        # always visible, then detection (turn-taking priority) and tool fit into
-        # what's left; any remainder folds into the model (first-pass / TTS).
-        model_floor = min(aud or 0, total)
-        det_seg = min(det, max(0, total - model_floor))
-        tool_seg = min(tool_ms, max(0, total - model_floor - det_seg)) if tool_ms else 0
-        model_seg = max(0, total - det_seg - tool_seg)
+        tools = []
+        for t in g["tools"]:
+            sw = funcs[fpi] if fpi < len(funcs) else None
+            fpi += 1
+            st, en = _intish(t.get("start_timestamp")), _intish(t.get("end_timestamp"))
+            tools.append({
+                "name": t.get("function_name") or (sw or {}).get("name") or "function",
+                "ms": (_pos(t.get("execution_latency")) or _pos(t.get("function_latency"))
+                       or _pos(t.get("latency"))),
+                "args": (sw or {}).get("args"),
+                "result": clean_text((sw or {}).get("result") or t.get("content")),
+                "url": (sw or {}).get("url"),
+                "post_response": (sw or {}).get("post_response"),
+            })
+            if isinstance(st, int):
+                pts.append((st, "tool_start", "tool"))
+            if isinstance(en, int):
+                pts.append((en, "tool_end", "tool"))
 
-        human = None
-        if user_entry:
-            talk = user_entry.get("speaking_to_final_event")
-            if not isinstance(talk, (int, float)):
-                st, en = user_entry.get("start_timestamp"), user_entry.get("end_timestamp")
-                try:
-                    talk = round((float(en) - float(st)) / 1000) if (st and en) else None
-                except Exception:
-                    talk = None
-            eot = user_entry.get("eot") or {}
-            human = {
-                "text": (user_entry.get("content") or "").strip(),
-                "talk_ms": talk,
-                "confidence": (user_entry.get("confidence") * 100
-                               if isinstance(user_entry.get("confidence"), (int, float)) else None),
-                "eot_basis": eot.get("basis"),
-                "eot_conf": (eot.get("confidence") * 100
-                             if isinstance(eot.get("confidence"), (int, float)) else None),
-                "segments": timing.get("segments"),
-                "entity": user_entry.get("entity"),
+        # The reply text / seek even when no stamps were captured for the exchange.
+        reply_e = reply or (g["ai"][-1] if g["ai"] else None)
+        row = {
+            "caller": clean_text((u.get("content") or "").strip()) if u else None,
+            "reply": clean_text((reply_e.get("content") or "").strip()) if reply_e else "",
+            "seek": _seek(reply_e or u or {}, record_start),
+            "tools": tools,
+            "milestones": [],
+            "stages": [],
+            "span_ms": None,
+            "hero_ms": None,
+            "speed": "na",
+            "talk_ms": None,
+        }
+        if u:
+            ent = u.get("entity") if isinstance(u.get("entity"), dict) else None
+            eot = u.get("eot") or {}
+            row["caller_meta"] = {
+                "entity": ent if (ent and ent.get("value")) else None,
+                "eot": eot.get("basis"),
+                "confidence": (u.get("confidence") * 100
+                               if isinstance(u.get("confidence"), (int, float)) else None),
             }
+            su_u = _stamps_of(u)
+            det_ms = (round((su_u["turn_decided"] - su_u["last_word_end"]) / 1000)
+                      if ("last_word_end" in su_u and "turn_decided" in su_u) else 0)
+            if not det_ms:
+                cl = (u.get("timing") or {}).get("commit_latency_ms")
+                det_ms = cl if isinstance(cl, (int, float)) else 0
+            row["verdict_kind"], row["verdict"] = _verdict(u, det_ms)
 
-        verdict_kind, verdict_text = _verdict(user_entry, det_seg)
-        out.append({
-            "idx": idx,
-            "seek": _seek(e, record_start),
-            "ai_text": text,
-            "human": human,
-            "total": round(total),
-            "total_source": "recording" if wav else "server",
-            "speed": _speed(model_seg),
-            "det": round(det_seg),
-            "tool": round(tool_seg),
-            "tool_names": tool_names,
-            "model": round(model_seg),
-            "ttft": lat,
-            "utterance": utt,
-            "audio": aud,
-            "acoustic": ac,
-            "wav": wav,
-            "diverges": bool(wav and ac and abs(ac - wav) > max(400, 0.25 * wav)),
-            "verdict": verdict_text,
-            "verdict_kind": verdict_kind,
-        })
+        if pts:
+            seen, dedup = set(), []
+            for pt in pts:
+                if (pt[0], pt[1]) in seen:
+                    continue
+                seen.add((pt[0], pt[1]))
+                dedup.append(pt)
+            pts = sorted(dedup, key=lambda x: x[0])
+            t0, t1 = pts[0][0], pts[-1][0]
+            span = max(1, t1 - t0)
+            row["span_ms"] = round(span / 1000)
+            row["milestones"] = [{
+                "name": n, "label": _MILESTONE_LABEL.get(n, n), "cat": cat,
+                "off_ms": round((t - t0) / 1000), "x": round((t - t0) / span * 100, 2),
+                "ts": fmt_ts(t, "%H:%M:%S"),
+            } for (t, n, cat) in pts]
+            stages = []
+            for (ta, _na, _ca), (tb, nb, cb) in zip(pts, pts[1:]):
+                ms = round((tb - ta) / 1000)
+                if ms < 1:
+                    continue
+                stages.append({
+                    "label": _GAP_LABEL.get(nb, nb), "cat": cb, "ms": ms,
+                    "x": round((ta - t0) / span * 100, 2),
+                    "w": round((tb - ta) / span * 100, 2),
+                    "tool": nb == "tool_end",
+                })
+            row["stages"] = stages
+            # headline: mouth-to-ear (caller's last word → first audio out)
+            lwe = next((t for (t, n, _c) in pts if n == "last_word_end"), None)
+            fa = next((t for (t, n, _c) in reversed(pts) if n in ("first_audio", "filler_audio")), None)
+            sstart = next((t for (t, n, _c) in pts if n == "speech_start"), None)
+            row["hero_ms"] = round((fa - lwe) / 1000) if (lwe and fa) else round(span / 1000)
+            row["speed"] = _speed(row["hero_ms"])
+            row["anchored"] = lwe is not None
+            if sstart and lwe:
+                row["talk_ms"] = round((lwe - sstart) / 1000)
+        out.append(row)
     return out
 
 
@@ -793,6 +917,116 @@ def build_waterfall(payload: dict) -> dict:
         })
     out.sort(key=lambda ev: ev["off"])
     return {"events": out, "span": span}
+
+
+# --------------------------------------------------------------------------- #
+# Event stream (the Events sub-tab — the call's control flow as a narrative)
+# --------------------------------------------------------------------------- #
+
+# Conversational turns are shown in Conversation / Pipeline / Flow; the Events
+# narrative is the *control flow* around them.
+_EVENT_SKIP = {"user_input", "ai_response", "tool_result"}
+
+# Event type -> visual category (drives the rail dot colour).
+EVENT_CAT = {
+    "session_start": "session", "session_end": "session", "summarize_start": "session",
+    "startup_hook": "session", "hangup_hook": "session",
+    "step_change": "nav", "context_enter": "nav", "reset": "nav",
+    "gather_start": "gather", "gather_question": "gather", "gather_answer": "gather",
+    "gather_reject": "error", "gather_complete": "gather",
+    "function_call": "fn", "function_error": "error",
+    "check_for_input": "misc", "attention_timeout": "misc",
+    "manual_say": "say", "filler": "say",
+    "hearing_hint": "edit", "pronounce_rule": "edit", "pronounce": "edit",
+    "auto_correct": "edit", "text_normalize": "edit",
+}
+
+
+def _event_title(etype: str, d: dict) -> str:
+    """One human-readable headline for a control-flow event."""
+    g = d.get
+    def ms(x):
+        return " · %dms" % x if isinstance(x, (int, float)) and x else ""
+    if etype == "session_start":
+        return "Session started" + (" · %s" % g("model") if g("model") else "")
+    if etype == "session_end":
+        return "Session ended — %s%s" % (g("reason") or "?", " by %s" % g("ended_by") if g("ended_by") else "")
+    if etype == "summarize_start":
+        return "Summarizing conversation" + (" · %s" % g("model") if g("model") else "")
+    if etype in ("startup_hook", "hangup_hook"):
+        return EVENT_LABELS.get(etype, etype) + ms(g("duration_ms")) + (" — %s" % g("error") if g("error") else "")
+    if etype == "step_change":
+        return "Step  %s → %s" % (g("from_step") or "?", g("to_step") or "?")
+    if etype == "context_enter":
+        return "Context  %s → %s" % (g("from_context") or "?", g("to_context") or "?")
+    if etype == "reset":
+        return "Conversation reset" + (" (full)" if g("full_reset") else "")
+    if etype == "gather_start":
+        return "Gather started" + (" — %d questions" % g("total_questions") if g("total_questions") else "")
+    if etype == "gather_question":
+        return "Asking: %s%s" % (g("key") or "?", " (%s)" % g("question_type") if g("question_type") else "")
+    if etype == "gather_answer":
+        return "Answered: %s%s" % (g("key") or "?", " · confirmed" if g("confirmed") else "")
+    if etype == "gather_reject":
+        return "Rejected: %s — %s" % (g("key") or "?", g("reason") or "?")
+    if etype == "gather_complete":
+        return "Gather complete" + (" — %s answered" % g("answered") if g("answered") is not None else "")
+    if etype == "function_call":
+        return "%s()%s%s" % (g("function") or "?", ms(g("duration_ms")), " · native" if g("native") else "")
+    if etype == "function_error":
+        return "Function error — %s (%s)" % (g("function") or "?", g("error_type") or g("http_code") or "?")
+    if etype == "check_for_input":
+        return "Input poll returned" + ms(g("duration_ms"))
+    if etype == "attention_timeout":
+        return "Attention timeout" + ms(g("timeout_ms"))
+    if etype == "manual_say":
+        return "System said" + (" — recovery" if g("is_error") else "")
+    if etype == "filler":
+        return "Filler audio" + (" · %s" % g("filler_type") if g("filler_type") else "")
+    return EVENT_LABELS.get(etype, etype)
+
+
+def _event_extra(etype: str, d: dict) -> str:
+    """Secondary detail line (verbatim text, a rewrite, an error reason)."""
+    g = d.get
+    if etype in ("manual_say", "filler"):
+        t, r = g("text"), g("error_reason")
+        return (("“%s”" % t) if t else "") + ((" — %s" % r) if r else "")
+    if etype in ("hearing_hint", "pronounce_rule", "pronounce", "auto_correct", "text_normalize"):
+        o = clean_text(g("original"))
+        r = clean_text(g("result") or g("corrected") or g("normalized"))
+        return ("%s → %s" % (o, r)) if (o or r) else ""
+    if etype == "step_change" and g("trigger"):
+        return "trigger: %s" % g("trigger")
+    if etype == "function_call" and g("error"):
+        return "error: %s" % g("error")
+    if etype == "gather_answer" and g("attempt"):
+        return "attempt %s" % g("attempt")
+    return ""
+
+
+def build_events(payload: dict) -> list:
+    """The call's control flow as a readable narrative: step/context changes,
+    gather flow, function calls + errors, text rewrites, and session lifecycle —
+    everything in ``call_timeline`` except the conversational turns themselves.
+    """
+    out = []
+    for ev in build_timeline(payload):
+        etype = ev["type"]
+        # Conversational turns live elsewhere; text rewrites (pronounce / hearing
+        # hint / normalize) are their own feature — keep this to control flow.
+        if etype in _EVENT_SKIP or EVENT_CAT.get(etype) == "edit":
+            continue
+        d = ev["details"] or {}
+        out.append({
+            "ts_str": ev["ts_str"],
+            "elapsed": ev["elapsed"],
+            "type": etype,
+            "cat": EVENT_CAT.get(etype, "misc"),
+            "title": _event_title(etype, d),
+            "extra": _event_extra(etype, d),
+        })
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -861,6 +1095,67 @@ def summary(payload: dict) -> dict:
         "substituted": ppd.get("substituted"),
         "parsed": ppd.get("parsed"),
     }
+
+
+def _intish(v):
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return v
+
+
+def call_facts(payload: dict) -> dict:
+    """All the call-level metadata for the Data tab — identity, caller/routing,
+    recording, and timing — drawn from the top-level fields, ``SWMLVars`` and
+    ``SWMLCall``, plus those two blocks verbatim for "everything else captured".
+    Each fact is ``(label, value, kind)`` where kind drives rendering
+    (mono id / timestamp / url / plain).
+    """
+    sv = payload.get("SWMLVars") or {}
+    sc = payload.get("SWMLCall") or {}
+    groups = {
+        "identity": [
+            ("Call ID", payload.get("call_id"), "mono"),
+            ("AI session", payload.get("ai_session_id"), "mono"),
+            ("AI id tag", payload.get("ai_id_tag"), "mono"),
+            ("Segment", sc.get("segment_id"), "mono"),
+            ("Project", payload.get("project_id") or sc.get("project_id"), "mono"),
+            ("Space", payload.get("space_id") or sc.get("space_id"), "mono"),
+            ("Node", sc.get("node_id"), "mono"),
+            ("App", payload.get("app_name"), "text"),
+            ("Action", payload.get("action"), "text"),
+            ("Disposition", payload.get("content_disposition"), "text"),
+        ],
+        "routing": [
+            ("Caller name", payload.get("caller_id_name"), "text"),
+            ("Caller number", payload.get("caller_id_number"), "mono"),
+            ("Direction", sc.get("direction"), "text"),
+            ("From", sc.get("from"), "mono"),
+            ("To", sc.get("to"), "mono"),
+            ("State", sc.get("call_state"), "text"),
+            ("Channel", sc.get("type"), "text"),
+            ("Conversation", payload.get("conversation_type"), "text"),
+        ],
+        "recording": [
+            ("Recording URL", sv.get("record_call_url"), "url"),
+            ("Record start", _intish(sv.get("record_call_start")), "ts"),
+            ("Record result", sv.get("record_call_result"), "text"),
+            ("Answer result", sv.get("answer_result"), "text"),
+            ("Control ID", sv.get("record_control_id"), "mono"),
+        ],
+        "timing": [
+            ("Call start", payload.get("call_start_date"), "ts"),
+            ("Answered", payload.get("call_answer_date"), "ts"),
+            ("AI start", payload.get("ai_start_date"), "ts"),
+            ("AI end", payload.get("ai_end_date"), "ts"),
+            ("Call end", payload.get("call_end_date"), "ts"),
+        ],
+    }
+    out = {g: [(label, v, k) for (label, v, k) in rows if v not in (None, "", [], {})]
+           for g, rows in groups.items()}
+    out["swml_vars"] = sv
+    out["swml_call"] = sc
+    return out
 
 
 # --------------------------------------------------------------------------- #

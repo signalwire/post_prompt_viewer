@@ -90,6 +90,7 @@ class Settings:
 
     # latency_checker analysis params
     energy_threshold: float
+    onset_peak_mult: float             # AI onset gate = energy_threshold * this (rejects Opus CNG)
     min_silence_ms: int
 
     @property
@@ -152,5 +153,6 @@ def get_settings() -> Settings:
         playback_format=playback_format,
         keep_original_recordings=_env_bool("PPV_KEEP_ORIGINAL_RECORDINGS", False),
         energy_threshold=_env_float("PPV_ENERGY_THRESHOLD", 50.0),
+        onset_peak_mult=_env_float("PPV_ONSET_PEAK_MULT", 35.0),
         min_silence_ms=_env_int("PPV_MIN_SILENCE_MS", 2000),
     )

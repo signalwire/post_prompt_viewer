@@ -176,19 +176,18 @@ async def detail(request: Request, call_id: str, src: str = "blessed"):
             pass
     analysis = recording.get("analysis") if recording.get("status") == "done" else None
     alignment = enrich.align_latency(payload, analysis) if analysis else None
-    flow = enrich.build_flow(payload, analysis)
-    flow_scale = max([f["total"] for f in flow] + [1])
     waterfall = enrich.build_waterfall(payload)
-    # Summary stats over the agent latency (excludes turn-taking + tool time).
-    _lat = sorted(f["model"] for f in flow)
-    breakdown_stats = {
-        "avg": round(sum(_lat) / len(_lat)),
-        "median": round(statistics.median(_lat)),
-        "p95": _lat[min(len(_lat) - 1, int(round(0.95 * (len(_lat) - 1))))],
-        "max": _lat[-1],
-        "count": len(_lat),
-        "rec_count": sum(1 for f in flow if f["total_source"] == "recording"),
-    } if _lat else None
+    trace = enrich.build_trace(payload)
+    events = enrich.build_events(payload)
+    # Summary stats over the per-turn mouth-to-ear latency.
+    _tl = sorted(r["hero_ms"] for r in trace if r.get("hero_ms"))
+    turn_stats = {
+        "avg": round(sum(_tl) / len(_tl)),
+        "median": round(statistics.median(_tl)),
+        "p95": _tl[min(len(_tl) - 1, int(round(0.95 * (len(_tl) - 1))))],
+        "max": _tl[-1],
+        "count": len(_tl),
+    } if _tl else None
     source = "raw" if src == "raw" else "blessed"
     transcript = enrich.build_transcript(payload, source=source)
     # Sorted index of seekable spoken turns, for prev/next + current-turn highlight.
@@ -210,6 +209,7 @@ async def detail(request: Request, call_id: str, src: str = "blessed"):
             "src": source,
             "summary": enrich.summary(payload),
             "totals": enrich.totals(payload),
+            "call_facts": enrich.call_facts(payload),
             "transcript": transcript,
             "seek_index": seek_index,
             "has_raw_log": bool(payload.get("raw_call_log")),
@@ -221,9 +221,9 @@ async def detail(request: Request, call_id: str, src: str = "blessed"):
             "audio_present": audio_present,
             "analysis": analysis,
             "alignment": alignment,
-            "breakdown_stats": breakdown_stats,
-            "flow": flow,
-            "flow_scale": flow_scale,
             "waterfall": waterfall,
+            "trace": trace,
+            "turn_stats": turn_stats,
+            "events": events,
         },
     )

@@ -113,42 +113,6 @@ def test_align_latency_synthetic():
     assert out["aggregate"]["server_acoustic_avg"] == 700
 
 
-def test_build_flow_split_and_held_verdict():
-    # Latency = detection (commit) + tool (execution) + model, summing to the
-    # total; pairing reaches the user turn across the tool-call entries; the eot
-    # basis drives the plain-English verdict.
-    payload = {"call_log": [
-        {"role": "user", "content": "714 East Osage", "timestamp": 1,
-         "timing": {"commit_latency_ms": 5000, "segments": 3},
-         "eot": {"basis": "growth_stop", "confidence": 0.88}},
-        {"role": "assistant", "timestamp": 2,
-         "tool_calls": [{"id": "1", "type": "function", "function": {"name": "validate", "arguments": "{}"}}]},
-        {"role": "tool", "content": "ok", "timestamp": 3,
-         "function_name": "validate", "execution_latency": 1500},
-        {"role": "assistant", "content": "The pickup address is set.", "timestamp": 4,
-         "latency": 500, "utterance_latency": 600, "audio_latency": 700, "acoustic_latency": 9999},
-    ]}
-    f = enrich.build_flow(payload)[0]  # no recording -> server total = acoustic
-    assert f["det"] + f["tool"] + f["model"] == f["total"] == 9999
-    assert f["det"] == 5000 and f["tool"] == 1500 and f["total_source"] == "server"
-    assert f["verdict_kind"] == "held" and "3 parts" in f["verdict"]
-    assert f["human"]["text"] == "714 East Osage"
-
-
-def test_build_flow_entity_snap_verdict():
-    payload = {"call_log": [
-        {"role": "user", "content": "j at gmail", "timestamp": 1,
-         "timing": {"commit_latency_ms": 300},
-         "entity": {"type": "email", "valid": True, "value": "j@gmail.com"},
-         "eot": {"basis": "entity_snap", "confidence": 0.97}},
-        {"role": "assistant", "content": "Got it.", "timestamp": 2,
-         "latency": 200, "utterance_latency": 300, "audio_latency": 400, "acoustic_latency": 1200},
-    ]}
-    f = enrich.build_flow(payload)[0]
-    assert f["verdict_kind"] == "snap" and "email" in f["verdict"]
-    assert f["human"]["entity"]["value"] == "j@gmail.com"
-
-
 def test_build_waterfall_offsets_lanes_and_swaig():
     payload = {
         "call_log": [{"role": "assistant", "content": "hi", "timestamp": 2_000_000}],
@@ -169,3 +133,52 @@ def test_build_waterfall_offsets_lanes_and_swaig():
     assert evs["function_call"]["lane"] == "tool"
     assert evs["function_call"]["swaig"]["name"] == "lookup"
     assert [e["off"] for e in wf["events"]] == sorted(e["off"] for e in wf["events"])
+
+
+def test_build_events_narrative_and_clean_text():
+    payload = {"call_timeline": [
+        {"ts": 1_000_000, "type": "session_start", "model": "gpt-4o"},
+        {"ts": 2_000_000, "type": "step_change", "from_step": "greet", "to_step": "collect",
+         "trigger": "ai_function"},
+        {"ts": 3_000_000, "type": "function_call", "function": "check_order", "duration_ms": 234},
+        {"ts": 4_000_000, "type": "function_error", "function": "check_order",
+         "error_type": "timeout", "http_code": 500},
+        {"ts": 5_000_000, "type": "ai_response", "audio_latency": 100},          # conversational -> skipped
+        {"ts": 6_000_000, "type": "pronounce", "original": "~LN(English)-; Hi", "result": "Hi"},  # rewrite -> skipped
+    ]}
+    ev = enrich.build_events(payload)
+    types = [e["type"] for e in ev]
+    assert "ai_response" not in types and "pronounce" not in types
+    by = {e["type"]: e for e in ev}
+    assert by["session_start"]["cat"] == "session"
+    assert "greet → collect" in by["step_change"]["title"]
+    assert by["step_change"]["extra"] == "trigger: ai_function"
+    assert by["function_call"]["title"].startswith("check_order() · 234ms")
+    assert by["function_error"]["cat"] == "error"
+    # the ~LN(*)-; TTS directive is stripped wherever text is shown
+    assert enrich.clean_text("~LN(English)-; Hello there") == "Hello there"
+    assert enrich.clean_text("plain text") == "plain text"
+
+
+def test_call_facts_groups_and_swml():
+    payload = {
+        "call_id": "abc", "ai_session_id": "sess", "project_id": "proj", "app_name": "swml app",
+        "caller_id_name": "tony", "caller_id_number": "+12025550100", "conversation_type": "voice",
+        "call_start_date": 1781402455892315,
+        "SWMLVars": {"record_call_url": "https://files/x.wav", "record_call_start": "1781402457172746",
+                     "record_call_result": "success"},
+        "SWMLCall": {"direction": "inbound", "from": "sip:+1@host", "to": "sip:bot@host",
+                     "call_state": "answered", "type": "sip", "segment_id": "seg"},
+    }
+    cf = enrich.call_facts(payload)
+    ident = {l: v for l, v, k in cf["identity"]}
+    assert ident["Call ID"] == "abc" and ident["Project"] == "proj" and ident["Segment"] == "seg"
+    rec = {l: (v, k) for l, v, k in cf["recording"]}
+    assert rec["Recording URL"] == ("https://files/x.wav", "url")
+    assert rec["Record start"] == (1781402457172746, "ts")  # stringified micros coerced to int
+    routing = {l: v for l, v, k in cf["routing"]}
+    assert routing["From"] == "sip:+1@host" and routing["Direction"] == "inbound"
+    # empty fields are dropped; the raw blocks pass through verbatim
+    assert all(v not in (None, "") for g in ("identity", "routing", "recording", "timing")
+               for _, v, _ in cf[g])
+    assert cf["swml_vars"]["record_call_result"] == "success" and cf["swml_call"]["type"] == "sip"

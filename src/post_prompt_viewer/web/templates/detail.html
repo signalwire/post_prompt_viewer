@@ -16,7 +16,7 @@
       {% if t.perf.answer_time is not none %}<span class="chip">answer <b>{{ '%.2f'|format(t.perf.answer_time) }}s</b></span>{% endif %}
       {% if t.perf.tokens %}<span class="chip">tokens <b>{{ t.perf.tokens }}</b></span>{% endif %}
     {% endif %}
-    {% if t.barge %}<span class="chip accent">barged @ {{ t.barge.elapsed_ms }}ms</span>{% endif %}
+    {% if t.barge %}<span class="chip accent" title="caller barged in{% if t.barge.pct_heard is not none %} — heard ~{{ t.barge.pct_heard }}% before interrupting{% endif %}">barged{% if t.barge.elapsed_ms %} @ {{ t.barge.elapsed_ms }}ms{% endif %}{% if t.barge.pct_heard is not none %} &middot; {{ t.barge.pct_heard }}% heard{% endif %}</span>{% endif %}
   {% elif t.kind == 'user' %}
     {% if t.entity %}<span class="chip entity {{ 'ok' if t.entity.valid else 'bad' }}" title="extracted {{ t.entity.type }} — {{ 'valid' if t.entity.valid else 'invalid' }}">{{ t.entity.type }} <b>{{ t.entity.value }}</b> {{ '✓' if t.entity.valid else '✕' }}</span>{% endif %}
     {% if t.confidence is defined and t.confidence is not none %}<span class="chip">confidence <b>{{ '%.0f'|format(t.confidence) }}%</b></span>{% endif %}
@@ -55,11 +55,22 @@
       {% if t.metadata %}<div class="chips">{% for k, v in t.metadata.items() %}<span class="chip">{{ k }} <b>{{ v }}</b></span>{% endfor %}</div>{% endif %}
     {% elif t.collapsible %}
       <details class="collapsible"><summary>{{ t.role }} · {{ (t.content or '')|length }} chars</summary><div class="content" style="margin-top:8px">{{ t.content }}</div></details>
+    {% elif t.barge and t.barge.unheard %}
+      <div class="content">{{ t.barge.heard }}<span class="cutoff" title="caller barged in at {{ t.barge.elapsed_ms }}ms — this part was never heard">{{ t.barge.unheard }}</span></div>
+      {{ chips_for(t) }}
     {% else %}
       <div class="content">{{ t.content }}</div>
       {{ chips_for(t) }}
     {% endif %}
   </div>
+{% endmacro %}
+
+{# ---- a single call-metadata fact, rendered by kind ---- #}
+{% macro fact(value, kind) %}
+  {%- if kind == 'ts' -%}{{ value | fmt_dt('%Y-%m-%d %H:%M:%S UTC') }}
+  {%- elif kind == 'url' -%}<a class="fact-url" href="{{ value }}" target="_blank" rel="noopener">{{ value }}</a>
+  {%- elif kind == 'mono' -%}<span class="mono">{{ value }}</span>
+  {%- else -%}{{ value }}{%- endif -%}
 {% endmacro %}
 
 {% block content %}
@@ -173,62 +184,74 @@
 {# ===================== TIMELINE (Flow + Waterfall) ===================== #}
 <section class="tab-panel" id="panel-latency" role="tabpanel">
   <div class="subtabs">
-    <button class="subtab active" data-sub="flow" type="button">Flow</button>
+    <button class="subtab active" data-sub="trace" type="button">Trace <span class="tab-count">{{ trace | length }}</span></button>
+    <button class="subtab" data-sub="events" type="button">Events <span class="tab-count">{{ events | length }}</span></button>
     <button class="subtab" data-sub="wfall" type="button">Waterfall <span class="tab-count">{{ waterfall.events | length }}</span></button>
   </div>
-  <div class="sub-panel active" data-subpanel="flow">
-  {% if latency.points %}
-  {% if breakdown_stats %}
-  <div class="stat-grid" style="margin-bottom:8px">
-    <div class="stat hl"><div class="label">Avg agent latency</div><div class="value">{{ breakdown_stats.avg | fmt_ms }}</div></div>
-    <div class="stat"><div class="label">Median</div><div class="value">{{ breakdown_stats.median | fmt_ms }}</div></div>
-    <div class="stat"><div class="label">p95</div><div class="value">{{ breakdown_stats.p95 | fmt_ms }}</div></div>
-    <div class="stat"><div class="label">Slowest turn</div><div class="value">{{ breakdown_stats.max | fmt_ms }}</div></div>
-  </div>
-  <p class="note" style="margin:0 0 18px">How fast the agent responded once it had the turn &mdash; the turn-taking hold and tool time are excluded. Each turn below shows the caller's full wait and where it went.</p>
-  {% endif %}
 
-  {# ── Flow: the call as turn-taking + latency, anchored on the recording truth ── #}
-  {% set vicon = {'snap':'⚡','instant':'✓','held':'✓','uncertain':'?','forced':'⚠'} %}
-  <div class="flow">
-    {% for f in flow %}
-    <article class="fx speed-{{ f.speed }}" style="--d:{{ (loop.index0 * 0.05) | round(2) }}s">
-      {% if f.human %}
-      <div class="fx-caller">
-        <span class="fx-who">caller</span>
-        <span class="fx-quote">{{ f.human.text or '—' }}</span>
-        <span class="fx-aside">
-          {%- if f.human.talk_ms %}spoke {{ (f.human.talk_ms / 1000) | round(1) }}s{% endif -%}
-          {%- if f.human.segments and f.human.segments > 1 %} · {{ f.human.segments }} parts{% endif -%}
-          {%- if f.human.entity %} · <span class="fx-ent">{{ f.human.entity.type }} {{ f.human.entity.value }}</span>{% endif -%}
-        </span>
-      </div>
-      {% else %}
-      <div class="fx-caller"><span class="fx-who fx-open">opening</span><span class="fx-aside">the agent spoke first</span></div>
-      {% endif %}
+  {# ── Trace: the whole conversation, every milestone on one axis ── #}
+  <div class="sub-panel active" data-subpanel="trace">
+    {% if trace %}
+    {% if turn_stats %}
+    <div class="stat-grid" style="margin-bottom:12px">
+      <div class="stat hl"><div class="label">Avg turn latency</div><div class="value">{{ turn_stats.avg | fmt_ms }}</div></div>
+      <div class="stat"><div class="label">Median</div><div class="value">{{ turn_stats.median | fmt_ms }}</div></div>
+      <div class="stat"><div class="label">p95</div><div class="value">{{ turn_stats.p95 | fmt_ms }}</div></div>
+      <div class="stat"><div class="label">Slowest turn</div><div class="value">{{ turn_stats.max | fmt_ms }}</div></div>
+    </div>
+    {% endif %}
+    <p class="note" style="margin:0 0 16px">Every turn of the conversation, <b>mouth&#8209;to&#8209;ear</b> &mdash; the caller's last word to first audio &mdash; with every milestone mapped on one clock. Click a <span style="color:var(--sw-purple)">function</span> to open its args &amp; result; click a turn to hear it.</p>
 
-      <div class="fx-resp">
-        <div class="fx-big">{{ f.model }}<span class="u">ms</span>{% if f.speed == 'fast' %} <span class="fx-zap">⚡</span>{% endif %}<span class="fx-resp-label">agent latency</span></div>
-        {% if f.verdict %}<div class="fx-resp-sub"><span class="fx-verdict vk-{{ f.verdict_kind }}">{{ vicon.get(f.verdict_kind, '·') }} {{ f.verdict }}</span></div>{% endif %}
-        {% if f.total > f.model %}
-        <div class="fx-gap" title="how the caller's {{ (f.total / 1000) | round(1) }}s wait was spent — only the bright slice is the agent">
-          {% if f.det %}<span class="gseg gseg-wait" style="flex:{{ f.det }}"></span>{% endif %}
-          {% if f.tool %}<span class="gseg gseg-tool" style="flex:{{ f.tool }}"></span>{% endif %}
-          <span class="gseg gseg-agent" style="flex:{{ f.model }}"></span>
+    {% set vicon = {'snap':'⚡','instant':'✓','held':'✓','uncertain':'?','forced':'⚠'} %}
+    <div class="trace">
+      {% for r in trace %}
+      <article class="tr-card speed-{{ r.speed }}{{ ' seekable' if (r.seek is not none and audio_present) }}" style="--d:{{ (loop.index0 * 0.05) | round(2) }}s"{% if r.seek is not none %} data-seek="{{ r.seek }}"{% endif %}>
+        <div class="tr-top">
+          <div class="tr-who">
+            {% if r.caller %}<span class="tr-arrow">&#8627;</span><span class="tr-caller">{{ r.caller }}</span>{% else %}<span class="tr-caller tr-open">opening &mdash; agent spoke first</span>{% endif %}
+            {% if r.caller_meta and r.caller_meta.entity %}<span class="chip entity ok">{{ r.caller_meta.entity.type }} <b>{{ r.caller_meta.entity.value }}</b></span>{% endif %}
+            {% if r.caller_meta and r.caller_meta.confidence is not none %}<span class="chip">conf <b>{{ '%.0f' | format(r.caller_meta.confidence) }}%</b></span>{% endif %}
+          </div>
+          {% if r.hero_ms is not none %}<div class="tr-hero">{{ r.hero_ms }}<span class="u">ms</span>{% if r.speed == 'fast' %} <span class="tr-zap">&#9889;</span>{% endif %}<small>{{ 'mouth-to-ear' if r.anchored else 'to first audio' }}</small></div>{% endif %}
         </div>
-        <div class="fx-gap-key">caller waited {{ (f.total / 1000) | round(1) }}s &mdash; {% if f.det %}held {{ (f.det / 1000) | round(1) }}s for them &middot; {% endif %}{% if f.tool %}{{ f.tool_names | join('+') }} {{ (f.tool / 1000) | round(1) }}s &middot; {% endif %}<b>agent {{ (f.model / 1000) | round(1) }}s</b></div>
+
+        {% if r.verdict %}<div class="tr-verdict vk-{{ r.verdict_kind }}">{{ vicon.get(r.verdict_kind, '·') }} {{ r.verdict }}</div>{% endif %}
+
+        {% if r.milestones %}
+        <div class="tr-track">
+          <div class="tr-bar">
+            {% for s in r.stages %}<span class="tr-seg cat-{{ s.cat }}{{ ' tr-fn-seg' if s.tool }}" style="left:{{ s.x }}%;width:{{ s.w }}%" data-tip="{{ s.label }} &middot; {{ s.ms }}ms"></span>{% endfor %}
+          </div>
+          <div class="tr-marks">
+            {% for m in r.milestones %}<span class="tr-mark cat-{{ m.cat }}" style="left:{{ m.x }}%" data-tip="{{ m.label }} &middot; +{{ m.off_ms }}ms @ {{ m.ts }}"></span>{% endfor %}
+          </div>
+        </div>
+        <div class="tr-key">
+          {% for m in r.milestones %}<span class="tr-kdot cat-{{ m.cat }}"><i></i>{{ m.label }} <b>+{{ m.off_ms }}ms</b></span>{% endfor %}
+        </div>
         {% endif %}
-      </div>
 
-      <div class="fx-ai">
-        <span class="fx-who ai">agent</span>
-        <span class="fx-quote">{{ f.ai_text }}</span>
-      </div>
-    </article>
-    {% endfor %}
-  </div>
+        {% for t in r.tools %}
+        <details class="tr-fn">
+          <summary><span class="tr-fn-name">&fnof; {{ t.name }}</span>{% if t.ms %}<span class="tr-fn-ms">{{ t.ms }}ms</span>{% endif %}</summary>
+          <div class="tr-fn-body">
+            {% if t.args is not none %}<span class="eyebrow">arguments</span><pre class="code">{{ t.args | pretty }}</pre>{% endif %}
+            {% if t.result %}<span class="eyebrow">result</span><pre class="code">{{ t.result }}</pre>{% endif %}
+            {% if t.url %}<span class="eyebrow">url</span><div class="mono" style="font-size:11px">{{ t.url }}</div>{% endif %}
+            {% if t.post_response %}<details class="code-collapse"><summary>post_response</summary><pre class="code">{{ t.post_response | pretty }}</pre></details>{% endif %}
+          </div>
+        </details>
+        {% endfor %}
 
-  {# Recording-measured cross-validation. #}
+        <div class="tr-reply">{{ r.reply }}</div>
+      </article>
+      {% endfor %}
+    </div>
+
+    {# Recording cross-check (moved from Flow) #}
+    {% if rec.has_recording %}
+    <details class="tr-xcheck">
+      <summary>Recording cross-check &mdash; server-reported vs recording-measured</summary>
   <div id="latency-wav"
        data-status-url="{{ url_for('recording_status', call_id=rec.call_id) }}"
        data-rec-initial="{{ recording.status }}">
@@ -291,10 +314,35 @@
       <script id="analysis-data" type="application/json">{{ {'ai_segments': analysis.ai_segments, 'human_segments': analysis.human_segments, 'latencies': analysis.latencies} | tojson }}</script>
     {% endif %}
   </div>
-  {% else %}
-  <p class="note">No per-turn latency was reported for this call.</p>
-  {% endif %}
-  </div>{# /sub-flow #}
+    </details>
+    {% endif %}
+    {% else %}
+    <p class="note">No turns to trace for this call.</p>
+    {% endif %}
+  </div>
+
+  {# ── Events: the call's control flow as a narrative ── #}
+  <div class="sub-panel" data-subpanel="events">
+    {% if events %}
+    <p class="note" style="margin:0 0 14px">The call's control flow &mdash; session lifecycle, step changes, gather, and function calls &mdash; as it happened.</p>
+    <ol class="ev">
+      {% for e in events %}
+      <li class="ev-row cat-{{ e.cat }}">
+        <span class="ev-dot"></span>
+        <div class="ev-body">
+          <div class="ev-line">
+            <span class="ev-title">{{ e.title }}</span>
+            {% if e.ts_str %}<span class="ev-time">{{ e.ts_str.rsplit(' ', 1)[-1] }}{% if e.elapsed %} &middot; +{{ e.elapsed }}{% endif %}</span>{% endif %}
+          </div>
+          {% if e.extra %}<div class="ev-extra">{{ e.extra }}</div>{% endif %}
+        </div>
+      </li>
+      {% endfor %}
+    </ol>
+    {% else %}
+    <p class="note">No control-flow events for this call.</p>
+    {% endif %}
+  </div>
 
   <div class="sub-panel" data-subpanel="wfall">
     {% if waterfall.events %}
@@ -330,6 +378,20 @@
 {# ===================== DATA (usage + raw) ===================== #}
 <section class="tab-panel" id="panel-telemetry" role="tabpanel">
   <div class="card">
+    <h3>Call</h3>
+    <div class="facts">
+      {% set fact_groups = [('Identity', call_facts.identity), ('Caller &amp; routing', call_facts.routing), ('Recording', call_facts.recording), ('Timing', call_facts.timing)] %}
+      {% for title, rows in fact_groups %}{% if rows %}
+      <div class="facts-col">
+        <span class="eyebrow">{{ title | safe }}</span>
+        <dl class="kv">
+          {% for label, value, kind in rows %}<dt>{{ label }}</dt><dd>{{ fact(value, kind) }}</dd>{% endfor %}
+        </dl>
+      </div>
+      {% endif %}{% endfor %}
+    </div>
+  </div>
+  <div class="card">
     <h3>Usage</h3>
     <div class="stat-grid">
       <div class="stat"><div class="label">Total minutes</div><div class="value">{{ totals.total_minutes | fmt_num }}</div></div>
@@ -346,6 +408,12 @@
     <pre class="code">{{ global_data | pretty }}</pre>
   </div>
   {% endif %}
+  <div class="card">
+    <span class="eyebrow">SWML variables &amp; call object</span>
+    <p class="note" style="margin:8px 0 4px">Everything the platform captured about the call.</p>
+    <details class="code-collapse" style="margin-top:8px"><summary>SWMLVars &middot; {{ call_facts.swml_vars | length }} keys</summary><pre class="code">{{ call_facts.swml_vars | pretty }}</pre></details>
+    <details class="code-collapse" style="margin-top:8px"><summary>SWMLCall &middot; {{ call_facts.swml_call | length }} keys</summary><pre class="code">{{ call_facts.swml_call | pretty }}</pre></details>
+  </div>
   <div class="card">
     <span class="eyebrow">Raw payload</span>
     <p class="note" style="margin:8px 0 14px">{{ payload | length }} top-level keys. The full JSON is large, so it isn't rendered inline &mdash; open or download it instead.</p>

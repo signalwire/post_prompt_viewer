@@ -93,6 +93,7 @@ All optional, read from the environment:
 | `PPV_KEEP_ORIGINAL_RECORDINGS` | `false` | Keep the full original after transcoding (default: delete it) |
 | `PPV_MAX_LIST` | `500` | Max calls shown on the index |
 | `PPV_ENERGY_THRESHOLD` | `50` | latency_checker speech-energy threshold |
+| `PPV_ONSET_PEAK_MULT` | `35` | AI-onset gate = threshold × this; rejects Opus comfort-noise so the recorded onset lands on real speech, not CNG (lib default is `5`) |
 | `PPV_MIN_SILENCE_MS` | `2000` | latency_checker turn-boundary silence (ms) |
 
 ## Architecture
