@@ -354,8 +354,9 @@ When mod_deepgram delivers turn telemetry on a speech final, three nested blocks
 | Field | Type | Description |
 |-------|------|-------------|
 | `hold_ms` | number | How long the dictation hold kept the turn open (0 for an un-held turn) |
-| `commit_latency_ms` | number | Last-token → commit (the stall window that elapsed) |
+| `commit_latency_ms` | number | Last-token → commit (the stall window that elapsed). The authoritative "how long EOT held this turn"; prefer it over inferring hold from the wall stamps |
 | `segments` | number | How many engine finals fused into the turn (1 = clean single turn; >1 = a held multi-segment dictation) |
+| `walkbacks` | number | How many times an end-of-turn was speculatively decided then retracted ("user kept talking") before the committing EOT. 0 = committed first try; high = the EOT logic churned (e.g. a long number read in spurts). Distinct from `segments` (engine finals) and `hold_ms` (duration) — this is *decision* churn |
 
 **Example user entry (blessed, metadata flattened):**
 
@@ -386,6 +387,7 @@ The pre-computed latency fields are in **milliseconds**. They measure different 
 | `acoustic_latency` | Text: end of user's last spoken word (from Deepgram word-level timestamps, anchored via `audio_anchor_wall_us` / `audio_anchor_stream_us`); falls back to last `detected-partial-speech` event if mod_deepgram didn't supply word-level fields / OART: `input_audio_buffer.speech_stopped` (server's end-of-turn decision) | Text: first non-silence PCM frame written (`audio_response_time`) / OART: first non-silence PCM frame written via `switch_core_session_write_frame` (`first_audio_write_time`) | Comparison against wav-based analyzers measuring acoustic-silence → first-audio-in-recording |
 | `eos_to_push_latency` | End of user's last spoken word (from word-level timestamps) | mod_deepgram's `status_pushed_wall_us` — when the final result was deliverable | Isolates ASR / turn-detection / fusion overhead from the model+TTS pipeline that `audio_latency` rolls in. Text mode only; absent when word-level timing fields aren't provided |
 | `dg_decision_latency` | mod_deepgram's `turn_decided_wall_us` — when the turn-end decision fired | mod_deepgram's `status_pushed_wall_us` | Pure mod_deepgram internal queue-push overhead. Useful for spotting implementation-side delays distinct from acoustic or fusion latency |
+| `poll` | mod_deepgram's `status_pushed_wall_us` — final deliverable | `request_detect` — when this module read the final / sent to the model | mod_openai's final-read lag. A term of the `acoustic = eos_to_push + audio + poll` decomposition, exposed as its own field so it's alarmed on directly rather than inferred. Text mode only; `null` when no anchor |
 
 **Start-point differences explained:**
 
@@ -406,7 +408,8 @@ If you are comparing against a wav-based acoustic analyzer (measuring from the l
 **`null` vs positive value:** `acoustic_latency`, `eos_to_push_latency`, and `dg_decision_latency` are always present in the schema on assistant entries. A positive number is a measured value; JSON `null` means the metric is not derivable for this turn. The null cases are:
 
 - **Greeting / timeout / end-of-call summary:** no preceding user turn → no acoustic anchor.
-- **`assistant-manual` entries** (queued `ais_say` fillers like "Querying the knowledge base"): these don't go through the LLM round-trip and have no latency of their own. All three derived metrics are always `null` for `assistant-manual` to prevent inheriting the surrounding response's values.
+- **`assistant-manual` entries** (queued `ais_say` fillers like "Querying the knowledge base"): these don't go through the LLM round-trip, so `latency` / `utterance_latency` / `audio_latency` / `eos_to_push_latency` / `dg_decision_latency` are `null` (they'd otherwise inherit the surrounding response's values). **Exception:** a filler *does* produce real audio the caller hears, so its entry carries its own `stamps_us.first_audio` (the filler's onset, stamped when the output thread plays it) and a real `acoustic_latency` (= filler `first_audio − last_word_end`). See [filler stamping](#filler-first-audio-vs-response-first-audio).
+- **Bad/absent end-of-speech anchor:** when mod_deepgram omits `last_word_end_wall_us` (bad anchor) and the `status_pushed_wall_us − timing.commit_latency_ms` reconstruction isn't available either, `acoustic_latency` and `eos_to_push_latency` are emitted `null` rather than computed against a missing stamp (`dg_decision_latency` is unaffected — it uses `turn_decided_wall_us`, present on every committed final).
 
 Consumers should treat `null` as "not measured," distinct from `0` (which would only ever appear if the bot somehow produced audio at the same μs as the user's last word — never in practice).
 
@@ -414,14 +417,15 @@ The three raw `*_wall_us` fields follow the same anchor convention: present (a w
 
 ### Raw wall-clock timestamps for custom derivations
 
-Wall-clock μs timestamps exposed on the assistant entry alongside the pre-computed latencies. Use these when you need a measurement the pre-computed fields don't cover (e.g. subtracting from any other wall-clock event in your stack). All three come from mod_deepgram's final result JSON; absent in OART mode, on turns with no preceding user-speech anchor, or when mod_deepgram didn't supply them.
+Wall-clock μs timestamps exposed on the assistant entry alongside the pre-computed latencies. Use these when you need a measurement the pre-computed fields don't cover (e.g. subtracting from any other wall-clock event in your stack). They come from mod_deepgram's final result JSON; absent in OART mode, on turns with no preceding user-speech anchor, or when mod_deepgram didn't supply them. The four turn stamps are **monotonic** and decompose the turn — `speech_start_wall_us` (speaking) → `last_word_end_wall_us` (hold) → `turn_decided_wall_us` (deliver) → `status_pushed_wall_us`.
 
 The values are snapshotted at the end of the most recent accepted user final and persist through the entire response cycle (LLM call, tool calls, reasoning, manual_says) — so they reflect the user turn the response is answering, not whatever live ASR state was when the audio thread happened to write a frame. Any subsequent user partials/finals only replace the snapshot after the *next* accepted user final.
 
 | Field | Meaning |
 |-------|---------|
-| `last_word_end_wall_us` | Wall-clock μs when the user's last spoken word's audio energy ended. Computed locally from `audio_anchor_wall_us + (engine_data[0].channel.alternatives[0].words[LAST].end × 1e6 - audio_anchor_stream_us)`. The most precise "user stopped talking" anchor available. |
-| `turn_decided_wall_us` | Wall-clock μs when mod_deepgram decided the turn ended — fusion fire OR Deepgram-natural `speech_final` OR libfvad `STOP_TALKING`. |
+| `speech_start_wall_us` | Wall-clock μs of speech onset for the turn (mod_deepgram's `StartOfSpeech`). The lower bound for the `last_word_end_wall_us` sanity guard, and lets you decompose turn latency entirely from mod_deepgram's clock. |
+| `last_word_end_wall_us` | Wall-clock μs when the **committed** turn's last spoken word ended — mod_deepgram's emitted value, the MAX word-end across **all** fused segments of a held multi-segment turn (not just the first segment, which used to inflate `acoustic_latency` / `eos_to_push_latency` by the full dictation span). **May be absent**: mod_deepgram omits it when the mapped time would precede speech onset (bad anchor); mod_openai then reconstructs end-of-speech from `status_pushed_wall_us − timing.commit_latency_ms`, and if even that is unavailable omits the dependent `acoustic_latency` / `eos_to_push_latency` rather than emit a bogus value. The most precise "user stopped talking" anchor available. |
+| `turn_decided_wall_us` | Wall-clock μs of the turn-end decision that **committed** — the `EOT_RELEASE` on a held turn, else the fusion fire / Deepgram-natural `speech_final` / libfvad `STOP_TALKING`. Anchored on the committing decision, not the first *speculative* fire that got walked back — so `dg_decision_latency` measures real release→push delivery (~10 ms), not the whole deliberation (which previously inflated it to tens of seconds on held dictations). |
 | `status_pushed_wall_us` | Wall-clock μs when `SignalWireRecognitionComplete` was pushed to the status queue (i.e. the moment the next `asr_check_results` poll would return SUCCESS). |
 
 **Custom derivations:**
@@ -432,6 +436,65 @@ eos_to_push_us      = status_pushed_wall_us - last_word_end_wall_us  (turn-detec
 ```
 
 These two are also exposed as the pre-computed `dg_decision_latency` and `eos_to_push_latency` fields in milliseconds.
+
+### Unified turn timeline (`stamps_us`)
+
+Assistant entries also carry a single `stamps_us` object — every pipeline event as a raw wall-clock-μs stamp on the one `switch_time_now` clock (the same clock `record_call_start` uses). A renderer needs **zero anchor math**: every interval is `stamp_b − stamp_a`, and recording alignment is `stamp − record_call_start`. The four caller stamps come from mod_deepgram, the four model stamps from mod_openai; all eight share the clock and are monotonic on a clean turn.
+
+| key | event | owner |
+|-----|-------|-------|
+| `speech_start` | caller began speaking | mod_deepgram |
+| `last_word_end` | caller's last word ended (= the wav human-stop anchor) | mod_deepgram |
+| `turn_decided` | end-of-turn committed | mod_deepgram |
+| `status_pushed` | ASR result deliverable | mod_deepgram |
+| `request_detect` | this module read the final / sent it to the model | mod_openai |
+| `first_token` | model's first response token | mod_openai |
+| `first_utterance` | first speakable segment | mod_openai |
+| `first_audio` | first non-silence PCM frame written | mod_openai |
+
+Every latency is then a subtraction:
+
+```
+latency             = first_token − request_detect
+utterance_latency   = first_utterance − request_detect
+audio_latency       = first_audio − request_detect
+eos_to_push_latency = status_pushed − last_word_end
+dg_decision_latency = status_pushed − turn_decided
+acoustic_latency    = first_audio − last_word_end       (the recorded silence — first_audio is the true PCM-write stamp)
+poll                = request_detect − status_pushed    (the final-read lag, exposed as its own field)
+```
+
+Example object on an assistant entry:
+
+```jsonc
+"stamps_us": {
+  "speech_start":    1781389930803000,
+  "last_word_end":   1781389931223000,
+  "turn_decided":    1781389931663000,
+  "status_pushed":   1781389931814000,
+  "request_detect":  1781389931834000,
+  "first_token":     1781389932526000,
+  "first_utterance": 1781389932573000,
+  "first_audio":     1781389932723000
+}
+```
+
+**Free cross-check:** `first_audio − last_word_end` should equal the recording's `ai_start − human_stop` within one codec frame — `last_word_end` is the wav human-stop anchor, on the record clock. If they diverge it's a real bug, now visible on the timeline instead of buried in a conflated latency.
+
+Keys are omitted when their stamp is unknown (no preceding user turn, OART mode, an engine that didn't supply it); the four model stamps are omitted on manual (non-LLM) assistant entries — **except** a filler's own `first_audio`, back-filled when the output thread plays it (below). **Backward compatibility:** `stamps_us` is purely additive — the legacy flat `*_wall_us` stamps and the millisecond `latency` / `acoustic_latency` / `eos_to_push_latency` / … fields are all still emitted, so existing readers are unaffected.
+
+#### Filler first-audio vs response first-audio
+
+When the agent plays a filler ("Let me look that up…") before a tool-backed answer, the **filler** is the caller's first agent audio — the recording catches it well before the generated answer. Two separate entries each carry their own onset, so the timeline shows both:
+
+| entry | `stamps_us.first_audio` | `acoustic_latency` |
+|-------|-------------------------|--------------------|
+| the **filler** (`assistant-manual`) | when the filler audio started | filler `first_audio − last_word_end` — the **true** caller-stop → first-agent-audio |
+| the **response** (`assistant`) | when the generated answer's first PCM was written | response `first_audio − last_word_end` — caller-stop → answer (includes the filler + tool gap) |
+
+So the exchange's true perceived latency is the **filler's** `acoustic_latency`; the response's is how long until the real answer. Before this, only the response was stamped, so a tool-backed turn's onset read ~1.2–1.4 s late.
+
+Caveat: the filler stamp is taken on the output thread as the filler begins playing (synthesis start). For the short cached fillers used here that's within a few frames of the first PCM; it is not the exact PCM-write instant the response's `first_audio` is (the manual playback path is a blocking `switch_ivr_speak_text_handle`, with no first-frame hook). OART-mode fillers go through a different path and are not stamped here.
 
 ### Stacking the latencies (full-pipeline view)
 
@@ -462,10 +525,10 @@ The new `acoustic_latency` (now sharpened) and `eos_to_push_latency` are anchore
 #### Identity
 
 ```
-acoustic_latency ≈ eos_to_push_latency + audio_latency + (asr_check_results poll delay)
+acoustic_latency = first_audio − last_word_end
 ```
 
-The poll delay is the only gap not directly exposed. Back it out as `acoustic_latency - eos_to_push_latency - audio_latency` if you need it.
+This **is** the recorded silence the caller hears — `first_audio` is stamped inline at the first PCM-frame write (not on a poll/batch tick), so there is nothing to correct. The algebraic decomposition `acoustic_latency = eos_to_push_latency + audio_latency + poll` still holds and every term is an emitted field, but `poll` (`request_detect − status_pushed`, the final-read lag) is exposed as its own field — **do not** subtract it from `acoustic_latency`. Cross-check: `first_audio − last_word_end` must equal the recording's `ai_start − human_stop` within one codec frame.
 
 #### Bar-segment breakdown for new consumers
 
@@ -475,7 +538,7 @@ A consumer building a stacked-bar visualization anchored at "user-stopped-talkin
 |---|---|
 | Turn detection (user-stopped → final deliverable) | `eos_to_push_latency` |
 | └─ of which mod_deepgram internal (decision → publish) | `dg_decision_latency` |
-| ASR check poll delay | (derived: `acoustic_latency - eos_to_push_latency - audio_latency`) |
+| ASR check poll delay | `poll` |
 | Model time-to-first-token | `latency` |
 | Model → utterance ready | `utterance_latency - latency` |
 | Utterance → audio frame | `audio_latency - utterance_latency` |
@@ -515,6 +578,8 @@ These fields auto-flatten into `call_timeline` `ai_response` events via `build_c
     "acoustic_latency": 720,
     "eos_to_push_latency": 95,
     "dg_decision_latency": 12,
+    "poll": 145,
+    "speech_start_wall_us": 1705300003900000,
     "last_word_end_wall_us": 1705300004380000,
     "turn_decided_wall_us": 1705300004463000,
     "status_pushed_wall_us": 1705300004475000,
