@@ -29,6 +29,9 @@ ppv.env
 # Internal references / handoffs (not part of the open-source repo)
 FINDINGS.md
 turn_controls.md
+for_producer.md
+acoustic_latency_anchor_fix.md
+suspected_end_for_openai.md
 
 # Ad-hoc call payloads dropped in the repo root (the curated sample is in samples/)
 /conversation_*.json

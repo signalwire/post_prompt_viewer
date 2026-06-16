@@ -37,7 +37,7 @@
 {% macro render_turn(t) %}
   {% set cls = kind_class.get(t.kind, 'system') %}
   {% set seekable = t.seek is not none and t.kind in ['assistant', 'assistant-manual', 'user'] %}
-  <div class="turn {{ cls }}{{ ' seekable' if seekable }}"{% if seekable %} data-turn="{{ t.idx }}" data-seek="{{ t.seek }}"{% endif %}>
+  <div class="turn {{ cls }}{{ ' cat-' + t.cat if t.cat }}{{ ' seekable' if seekable }}"{% if seekable %} data-turn="{{ t.idx }}" data-seek="{{ t.seek }}"{% endif %}>
     <div class="turn-head">
       <span class="role">
         {%- if t.kind == 'tool' -%}tool · {{ t.function_name or '?' }}
@@ -50,8 +50,11 @@
     </div>
     {% if t.kind == 'tool-call' %}
       <div class="content">{% for c in t.tool_calls %}→ {{ c.name }}({{ c.arguments | tojson }}){% if not loop.last %}<br>{% endif %}{% endfor %}</div>
+    {% elif t.kind == 'assistant-thinking' %}
+      <div class="content think-body">{{ t.content }}</div>
     {% elif t.kind in ['system-log', 'event'] %}
-      {% if t.content %}<div class="content">{{ t.content }}</div>{% endif %}
+      {% if t.scorecard %}{{ scorecard_bars(t.scorecard) }}
+      {% elif t.content %}<div class="content">{{ t.content }}</div>{% endif %}
       {% if t.metadata %}<div class="chips">{% for k, v in t.metadata.items() %}<span class="chip">{{ k }} <b>{{ v }}</b></span>{% endfor %}</div>{% endif %}
     {% elif t.collapsible %}
       <details class="collapsible"><summary>{{ t.role }} · {{ (t.content or '')|length }} chars</summary><div class="content" style="margin-top:8px">{{ t.content }}</div></details>
@@ -71,6 +74,23 @@
   {%- elif kind == 'url' -%}<a class="fact-url" href="{{ value }}" target="_blank" rel="noopener">{{ value }}</a>
   {%- elif kind == 'mono' -%}<span class="mono">{{ value }}</span>
   {%- else -%}{{ value }}{%- endif -%}
+{% endmacro %}
+
+{# ---- scorecard: coloured bars for numeric metrics, chips for text ---- #}
+{% macro scorecard_bars(metrics) %}
+<div class="sc-grid">
+  {% for m in metrics %}
+  {% if m.kind == 'num' %}
+  <div class="sc-metric" title="{{ m.label }}: {{ '%.2f'|format(m.pct / 100) }}">
+    <span class="sc-label">{{ m.label }}</span>
+    <span class="sc-track"><span class="sc-fill" style="width:{{ m.pct }}%; --good:{{ m.good }}"></span></span>
+    <span class="sc-val">{{ '%.2f'|format(m.pct / 100) }}</span>
+  </div>
+  {% else %}
+  <div class="sc-metric sc-textrow"><span class="sc-label">{{ m.label }}</span><span class="sc-chip">{{ m.text }}</span></div>
+  {% endif %}
+  {% endfor %}
+</div>
 {% endmacro %}
 
 {% block content %}
@@ -142,6 +162,13 @@
   <div class="card">
     <span class="eyebrow">AI post-call summary</span>
     <p style="margin:8px 0 0; color:var(--fg-secondary)">{{ summary.raw }}</p>
+  </div>
+  {% endif %}
+
+  {% if scorecard %}
+  <div class="card">
+    <h3>Scorecard <span class="note" style="font-weight:400">&middot; the AI's final read of the caller</span></h3>
+    {{ scorecard_bars(scorecard.metrics) }}
   </div>
   {% endif %}
 
@@ -267,6 +294,7 @@
             {% if e.ts_str %}<span class="ev-time">{{ e.ts_str.rsplit(' ', 1)[-1] }}{% if e.elapsed %} &middot; +{{ e.elapsed }}{% endif %}</span>{% endif %}
           </div>
           {% if e.extra %}<div class="ev-extra">{{ e.extra }}</div>{% endif %}
+          {% if e.scorecard %}<div class="ev-scorecard">{{ scorecard_bars(e.scorecard) }}</div>{% endif %}
         </div>
       </li>
       {% endfor %}
@@ -376,7 +404,12 @@
         <div class="lat-text">{{ p.text }}</div>
         <div class="chips">
           {% if p.audio_latency is not none %}<span class="chip">audio <b>{{ p.audio_latency }}ms</b></span>{% endif %}
-          {% if p.acoustic_latency is not none %}<span class="chip">acoustic <b>{{ p.acoustic_latency }}ms</b></span>{% endif %}
+          {% if p.acoustic_stamp is not none %}
+            <span class="chip" data-tip="first_audio − last_word_end — the caller-stop→AI-audio gap; the cross-check reference">acoustic <b>{{ p.acoustic_stamp }}ms</b></span>
+            {% if p.acoustic_latency is not none and p.acoustic_latency != p.acoustic_stamp %}<span class="chip dim" data-tip="raw acoustic_latency field — mis-anchored on turn_decided; snaps here once the producer anchor fix lands">field <b>{{ p.acoustic_latency }}ms</b></span>{% endif %}
+          {% elif p.acoustic_latency is not none %}
+            <span class="chip">acoustic <b>{{ p.acoustic_latency }}ms</b></span>
+          {% endif %}
           <span class="chip" style="color:var(--sw-gold);border-color:rgba(255,215,0,0.35)">wav <b>{{ p.wav_ms }}ms</b></span>
           {% if p.delta_ms is not none %}<span class="chip {{ 'accent' if (p.delta_ms | abs) > 150 else '' }}">Δ <b>{{ p.delta_ms }}ms</b></span>{% endif %}
         </div>

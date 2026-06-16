@@ -109,8 +109,33 @@ def test_align_latency_synthetic():
     out = enrich.align_latency(payload, analysis)
     assert out["matched"] == 1
     assert out["pairs"][0]["wav_ms"] == 680
-    assert out["pairs"][0]["delta_ms"] == -20  # 680 - 700 (acoustic preferred)
+    assert out["pairs"][0]["delta_ms"] == -20  # 680 - 700 (field used; no stamps present)
     assert out["aggregate"]["server_acoustic_avg"] == 700
+
+
+def test_align_latency_prefers_acoustic_stamp():
+    # With first_audio + last_word_end present, the cross-check derives acoustic =
+    # first_audio - last_word_end and uses THAT for the delta, ignoring a
+    # mis-anchored acoustic_latency field (here 700 vs the real 1000).
+    rec = 100_000_000
+    payload = {
+        "SWMLVars": {"record_call_start": str(rec)},
+        "call_log": [{
+            "role": "assistant", "content": "hi",
+            "timestamp": rec + 5_200_000, "start_timestamp": rec + 5_000_000,
+            "audio_latency": 500, "acoustic_latency": 700,  # field mis-anchored (short)
+            "stamps_us": {"first_audio": rec + 5_000_000, "last_word_end": rec + 4_000_000},  # 1000 ms gap
+        }],
+    }
+    analysis = {
+        "latencies": [{"human_stop": 4.0, "ai_start": 5.0, "latency": 1.0}],  # wav = 1000 ms
+        "statistics": {"avg_latency": 1.0, "num_latencies": 1},
+    }
+    out = enrich.align_latency(payload, analysis)
+    pair = out["pairs"][0]
+    assert pair["acoustic_stamp"] == 1000 and pair["acoustic_latency"] == 700
+    assert pair["delta_ms"] == 0          # 1000 wav - 1000 stamp-derived (not -300 off the field)
+    assert out["aggregate"]["server_acoustic_avg"] == 1000
 
 
 def test_build_waterfall_offsets_lanes_and_swaig():
@@ -135,29 +160,67 @@ def test_build_waterfall_offsets_lanes_and_swaig():
     assert [e["off"] for e in wf["events"]] == sorted(e["off"] for e in wf["events"])
 
 
-def test_build_events_narrative_and_clean_text():
-    payload = {"call_timeline": [
-        {"ts": 1_000_000, "type": "session_start", "model": "gpt-4o"},
-        {"ts": 2_000_000, "type": "step_change", "from_step": "greet", "to_step": "collect",
-         "trigger": "ai_function"},
-        {"ts": 3_000_000, "type": "function_call", "function": "check_order", "duration_ms": 234},
-        {"ts": 4_000_000, "type": "function_error", "function": "check_order",
-         "error_type": "timeout", "http_code": 500},
-        {"ts": 5_000_000, "type": "ai_response", "audio_latency": 100},          # conversational -> skipped
-        {"ts": 6_000_000, "type": "pronounce", "original": "~LN(English)-; Hi", "result": "Hi"},  # rewrite -> skipped
+def test_build_events_from_system_logs_and_scorecard():
+    # Sourced from call_log system-logs (not call_timeline), so every one shows -
+    # including no-metadata entries like the inner-dialog scorecard reads.
+    payload = {"call_log": [
+        {"role": "system-log", "action": "session_start", "timestamp": 1_000_000, "metadata": {"model": "gpt-4o"}},
+        {"role": "system-log", "action": "step_change", "timestamp": 2_000_000,
+         "metadata": {"from_step": "greet", "to_step": "collect", "trigger": "ai_function"}},
+        {"role": "system-log", "action": "function_call", "timestamp": 3_000_000,
+         "metadata": {"function": "check_order", "duration_ms": 234}},
+        {"role": "system-log", "action": "function_error", "timestamp": 4_000_000,
+         "metadata": {"function": "check_order", "error_type": "timeout", "http_code": 500}},
+        {"role": "system-log", "action": "inner_dialog_scorecard", "timestamp": 5_000_000,
+         "content": "running read:\n- sentiment: 0.60\n- frustration: 0.30\n- expertise: novice"},
+        {"role": "system-log", "action": "pronounce", "timestamp": 6_000_000,
+         "metadata": {"original": "~LN(English)-; Hi", "result": "Hi"}},   # rewrite -> skipped
+        {"role": "assistant", "content": "hi", "timestamp": 7_000_000},     # not system-log -> skipped
     ]}
     ev = enrich.build_events(payload)
     types = [e["type"] for e in ev]
-    assert "ai_response" not in types and "pronounce" not in types
+    assert "pronounce" not in types and "ai_response" not in types
     by = {e["type"]: e for e in ev}
     assert by["session_start"]["cat"] == "session"
     assert "greet → collect" in by["step_change"]["title"]
     assert by["step_change"]["extra"] == "trigger: ai_function"
     assert by["function_call"]["title"].startswith("check_order() · 234ms")
     assert by["function_error"]["cat"] == "error"
+    # inner-dialog scorecard parsed into coloured metrics; frustration is inverted
+    sc = by["inner_dialog_scorecard"]
+    assert sc["cat"] == "score"
+    m = {x["key"]: x for x in sc["scorecard"]}
+    assert m["sentiment"]["pct"] == 60 and m["sentiment"]["good"] == 0.6
+    assert m["frustration"]["pct"] == 30 and m["frustration"]["good"] == 0.7  # inverted: low is good
+    assert m["expertise"]["kind"] == "text" and m["expertise"]["text"] == "novice"
     # the ~LN(*)-; TTS directive is stripped wherever text is shown
     assert enrich.clean_text("~LN(English)-; Hello there") == "Hello there"
     assert enrich.clean_text("plain text") == "plain text"
+
+
+def test_scorecard_from_global_data():
+    payload = {"global_data": {"scorecard": {
+        "buying_intent": 0.85, "frustration": 0.35, "expertise": "intermediate",
+        "qualification": "strong", "v": 1}}}
+    sc = enrich.scorecard(payload)
+    m = {x["key"]: x for x in sc["metrics"]}
+    assert "v" not in m  # version dropped
+    assert m["buying_intent"]["kind"] == "num" and m["buying_intent"]["good"] == 0.85
+    assert m["frustration"]["good"] == 0.65  # inverted
+    assert m["qualification"]["text"] == "strong"
+    assert enrich.scorecard({"global_data": {}}) is None
+
+
+def test_record_start_prefers_first_frame():
+    # record_first_frame is the true recording t=0 (first PCM frame written);
+    # record_call_start (the relay-ack, ~100 ms earlier) is only the fallback.
+    both = {"SWMLVars": {"record_first_frame": 1000107000, "record_call_start": 1000000000}}
+    assert enrich._record_start(both) == 1000107000.0
+    legacy = {"SWMLVars": {"record_call_start": 1000000000}}
+    assert enrich._record_start(legacy) == 1000000000.0
+    assert enrich._record_start({"SWMLVars": {}}) is None
+    # stringified form tolerated
+    assert enrich._record_start({"SWMLVars": {"record_first_frame": "1000107000"}}) == 1000107000.0
 
 
 def test_call_facts_groups_and_swml():
@@ -166,6 +229,7 @@ def test_call_facts_groups_and_swml():
         "caller_id_name": "tony", "caller_id_number": "+12025550100", "conversation_type": "voice",
         "call_start_date": 1781402455892315,
         "SWMLVars": {"record_call_url": "https://files/x.wav", "record_call_start": "1781402457172746",
+                     "record_first_frame": "1781402457280000",
                      "record_call_result": "success"},
         "SWMLCall": {"direction": "inbound", "from": "sip:+1@host", "to": "sip:bot@host",
                      "call_state": "answered", "type": "sip", "segment_id": "seg"},
@@ -175,7 +239,8 @@ def test_call_facts_groups_and_swml():
     assert ident["Call ID"] == "abc" and ident["Project"] == "proj" and ident["Segment"] == "seg"
     rec = {l: (v, k) for l, v, k in cf["recording"]}
     assert rec["Recording URL"] == ("https://files/x.wav", "url")
-    assert rec["Record start"] == (1781402457172746, "ts")  # stringified micros coerced to int
+    assert rec["Record first frame"] == (1781402457280000, "ts")  # true recording t=0
+    assert rec["Record start (relay-ack)"] == (1781402457172746, "ts")  # stringified micros coerced to int
     routing = {l: v for l, v, k in cf["routing"]}
     assert routing["From"] == "sip:+1@host" and routing["Direction"] == "inbound"
     # empty fields are dropped; the raw blocks pass through verbatim

@@ -212,6 +212,7 @@ async def detail(request: Request, call_id: str, src: str = "blessed"):
             "summary": enrich.summary(payload),
             "totals": enrich.totals(payload),
             "call_facts": enrich.call_facts(payload),
+            "scorecard": enrich.scorecard(payload),
             "transcript": transcript,
             "seek_index": seek_index,
             "has_raw_log": bool(payload.get("raw_call_log")),

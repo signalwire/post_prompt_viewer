@@ -42,6 +42,7 @@ EVENT_LABELS = {
     "check_for_input": "Input poll",
     "manual_say": "Manual say",
     "attention_timeout": "Attention timeout",
+    "inner_dialog_scorecard": "Inner-dialog read",
     "filler": "Filler audio",
     "hearing_hint": "Hearing hint rewrite",
     "pronounce_rule": "Pronounce rewrite",
@@ -96,8 +97,20 @@ def fmt_duration(seconds: Optional[float]) -> str:
 
 
 def _record_start(payload: dict):
-    """record_call_start as a float (micros), tolerating the stringified form."""
-    rs = (payload.get("SWMLVars") or {}).get("record_call_start")
+    """Recording t=0 as a float (micros), tolerating the stringified form.
+
+    Prefer ``record_first_frame`` — the wall-clock µs of the first PCM frame
+    actually written to the recording file, on the same clock as every
+    ``stamps_us``. Fall back to ``record_call_start`` (the relay-ack, which fires
+    ~100 ms *before* the first frame) only when the newer field is absent, e.g.
+    older calls or a call with no recording. Anchoring on the relay-ack shifts the
+    whole recording timeline ~100 ms early and shows up as phantom "first_audio is
+    late"; ``record_first_frame`` removes it without touching any stamp.
+    """
+    sv = payload.get("SWMLVars") or {}
+    rs = sv.get("record_first_frame")
+    if rs is None:
+        rs = sv.get("record_call_start")
     try:
         return float(rs) if rs else None
     except (TypeError, ValueError):
@@ -386,6 +399,9 @@ def build_transcript(payload: dict, source: str = "blessed") -> list:
             turn["action"] = e.get("action")
             turn["label"] = EVENT_LABELS.get(e.get("action"), e.get("action") or "event")
             turn["metadata"] = e.get("metadata") or {}
+            turn["cat"] = EVENT_CAT.get(e.get("action"), "event")
+            if e.get("action") == "inner_dialog_scorecard":
+                turn["scorecard"] = _scorecard_metrics(parse_scorecard_text(content))
 
         elif role == "system":
             # The first/large system entry is the prompt; make it collapsible.
@@ -447,12 +463,26 @@ def latency_series(payload: dict) -> dict:
     for e in payload.get("call_log") or []:
         if e.get("role") in {"assistant", "assistant-manual"} and _latency_tiers(e):
             tiers = _latency_tiers(e)
-            points.append({
+            point = {
                 "ts": e.get("timestamp"),
                 "start_ts": e.get("start_timestamp"),
                 "text": (e.get("content") or "").strip()[:80],
                 **tiers,
-            })
+            }
+            # Stamp-derived acoustic gap: first_audio - last_word_end, the
+            # caller-stop -> AI-audio interval a wav analyzer measures. Robust to
+            # the ``acoustic_latency`` *field*, which has been seen mis-anchored on
+            # turn_decided (short by the eos->push gap). When the field is correct
+            # the two agree to a frame.
+            su = e.get("stamps_us") or {}
+            fa = su.get("first_audio")
+            lwe = e.get("last_word_end_wall_us") or su.get("last_word_end")
+            if fa and lwe:
+                try:
+                    point["acoustic_stamp"] = round((float(fa) - float(lwe)) / 1000)
+                except (TypeError, ValueError):
+                    pass
+            points.append(point)
 
     def _stats(key: str) -> Optional[dict]:
         vals = sorted(p[key] for p in points if key in p)
@@ -481,17 +511,16 @@ def align_latency(payload: dict, analysis: dict) -> dict:
     from the recording audio. We convert to milliseconds and, when the recording
     start time is known, match each wav-measured latency to the nearest AI turn
     (by absolute time) so it can sit beside that turn's server-reported
-    audio/acoustic latency. ``acoustic_latency`` is the field the payload spec
-    says to compare against a wav analyzer, so it is the preferred reference.
+    audio/acoustic latency. The reference is the stamp-derived acoustic gap
+    (``first_audio - last_word_end``) — the same caller-stop -> AI-audio interval
+    the wav measures — which is robust to the ``acoustic_latency`` field's anchor;
+    that field is carried alongside for comparison and falls back in if a stamp is
+    missing.
     """
     server = latency_series(payload)
     spoints = server["points"]
     wav = analysis.get("latencies") or []
-    record_start = (payload.get("SWMLVars") or {}).get("record_call_start")
-    try:  # some payloads stringify this timestamp; others send an int
-        record_start = float(record_start) if record_start is not None else None
-    except (TypeError, ValueError):
-        record_start = None
+    record_start = _record_start(payload)
 
     pairs = []
     used = set()
@@ -516,13 +545,18 @@ def align_latency(payload: dict, analysis: dict) -> dict:
                 used.add(best_i)
                 p = spoints[best_i]
                 wav_ms = round(w["latency"] * 1000)
-                ref = p.get("acoustic_latency")
+                # Prefer the stamp-derived acoustic gap (first_audio -
+                # last_word_end); fall back to the field, then audio_latency.
+                ref = p.get("acoustic_stamp")
+                if ref is None:
+                    ref = p.get("acoustic_latency")
                 if ref is None:
                     ref = p.get("audio_latency")
                 pairs.append({
                     "wav_ms": wav_ms,
                     "audio_latency": p.get("audio_latency"),
                     "acoustic_latency": p.get("acoustic_latency"),
+                    "acoustic_stamp": p.get("acoustic_stamp"),
                     "text": p.get("text"),
                     "delta_ms": (wav_ms - ref) if ref is not None else None,
                 })
@@ -538,6 +572,9 @@ def align_latency(payload: dict, analysis: dict) -> dict:
 
     audio = server["stats"].get("audio_latency") or {}
     acoustic = server["stats"].get("acoustic_latency") or {}
+    # Prefer the stamp-derived acoustic gap for the aggregate too; fall back to the
+    # (possibly mis-anchored) field stat when no turn carries the stamps.
+    astamp = [p["acoustic_stamp"] for p in spoints if p.get("acoustic_stamp") is not None]
     aggregate = {
         "wav_avg": _ms(stats.get("avg_latency")),
         "wav_median": _ms(stats.get("median_latency")),
@@ -546,7 +583,7 @@ def align_latency(payload: dict, analysis: dict) -> dict:
         "server_audio_avg": _rnd(audio, "avg"),
         "server_audio_median": _rnd(audio, "median"),
         "server_audio_p95": _rnd(audio, "p95"),
-        "server_acoustic_avg": _rnd(acoustic, "avg"),
+        "server_acoustic_avg": (round(sum(astamp) / len(astamp)) if astamp else _rnd(acoustic, "avg")),
     }
     return {
         "pairs": pairs,
@@ -971,6 +1008,7 @@ EVENT_CAT = {
     "gather_reject": "error", "gather_complete": "gather",
     "function_call": "fn", "function_error": "error",
     "check_for_input": "misc", "attention_timeout": "misc",
+    "inner_dialog_scorecard": "score",
     "manual_say": "say", "filler": "say",
     "hearing_hint": "edit", "pronounce_rule": "edit", "pronounce": "edit",
     "auto_correct": "edit", "text_normalize": "edit",
@@ -1040,27 +1078,83 @@ def _event_extra(etype: str, d: dict) -> str:
     return ""
 
 
+_SCORECARD_INVERT = {"frustration"}
+_SCORECARD_SKIP = {"v"}
+
+
+def _scorecard_metrics(card: dict) -> list:
+    """Render-ready scorecard rows: numeric metrics (0-1) become coloured bars,
+    text metrics (expertise / intent / qualification) become chips. ``good`` is
+    0..1 where 1 is the favourable end (inverted for frustration)."""
+    out = []
+    for k, v in (card or {}).items():
+        if k in _SCORECARD_SKIP or isinstance(v, bool):
+            continue
+        if isinstance(v, (int, float)):
+            val = max(0.0, min(1.0, float(v)))
+            good = (1 - val) if k in _SCORECARD_INVERT else val
+            out.append({"key": k, "label": k.replace("_", " "), "kind": "num",
+                        "pct": round(val * 100), "good": round(good, 3)})
+        elif v not in (None, ""):
+            out.append({"key": k, "label": k.replace("_", " "), "kind": "text", "text": str(v)})
+    return out
+
+
+def parse_scorecard_text(text: str) -> dict:
+    """Parse an ``inner_dialog_scorecard`` content blob (``- key: value`` lines)."""
+    card = {}
+    for line in (text or "").splitlines():
+        m = re.match(r"\s*-\s*([a-z_]+)\s*:\s*(.+)", line)
+        if not m:
+            continue
+        key, raw = m.group(1), m.group(2).strip()
+        try:
+            card[key] = float(raw)
+        except ValueError:
+            card[key] = raw
+    return card
+
+
+def scorecard(payload: dict) -> Optional[dict]:
+    """The final qualification scorecard from ``global_data`` as render-ready
+    metrics, or None when the call didn't run inner dialog."""
+    card = (payload.get("global_data") or {}).get("scorecard")
+    if not isinstance(card, dict) or not card:
+        return None
+    return {"metrics": _scorecard_metrics(card), "raw": card}
+
+
 def build_events(payload: dict) -> list:
-    """The call's control flow as a readable narrative: step/context changes,
-    gather flow, function calls + errors, text rewrites, and session lifecycle —
-    everything in ``call_timeline`` except the conversational turns themselves.
+    """The call's control flow as a readable narrative — sourced straight from the
+    ``call_log`` system-log entries so EVERY one shows (the producer's
+    ``call_timeline`` silently drops entries that carry no metadata, e.g. the
+    inner-dialog scorecard reads). Step/context changes, gather flow, function
+    calls + errors, session lifecycle, attention timeouts, and inner-dialog
+    scorecards; text rewrites are skipped (their own feature).
     """
     out = []
-    for ev in build_timeline(payload):
-        etype = ev["type"]
-        # Conversational turns live elsewhere; text rewrites (pronounce / hearing
-        # hint / normalize) are their own feature — keep this to control flow.
-        if etype in _EVENT_SKIP or EVENT_CAT.get(etype) == "edit":
+    last_ts = None
+    for e in payload.get("call_log") or []:
+        if e.get("role") != "system-log":
             continue
-        d = ev["details"] or {}
-        out.append({
-            "ts_str": ev["ts_str"],
-            "elapsed": ev["elapsed"],
+        etype = e.get("action") or "event"
+        if EVENT_CAT.get(etype) == "edit":
+            continue
+        d = e.get("metadata") or {}
+        ts = e.get("timestamp")
+        item = {
+            "ts_str": fmt_ts(ts) if ts else "",
+            "elapsed": fmt_elapsed(last_ts, ts) if (ts and last_ts) else "",
             "type": etype,
             "cat": EVENT_CAT.get(etype, "misc"),
             "title": _event_title(etype, d),
             "extra": _event_extra(etype, d),
-        })
+        }
+        if etype == "inner_dialog_scorecard":
+            item["scorecard"] = _scorecard_metrics(parse_scorecard_text(e.get("content")))
+        out.append(item)
+        if ts:
+            last_ts = ts
     return out
 
 
@@ -1173,7 +1267,8 @@ def call_facts(payload: dict) -> dict:
         ],
         "recording": [
             ("Recording URL", sv.get("record_call_url"), "url"),
-            ("Record start", _intish(sv.get("record_call_start")), "ts"),
+            ("Record first frame", _intish(sv.get("record_first_frame")), "ts"),
+            ("Record start (relay-ack)", _intish(sv.get("record_call_start")), "ts"),
             ("Record result", sv.get("record_call_result"), "text"),
             ("Answer result", sv.get("answer_result"), "text"),
             ("Control ID", sv.get("record_control_id"), "mono"),
