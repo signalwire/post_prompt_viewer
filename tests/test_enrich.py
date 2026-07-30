@@ -28,6 +28,46 @@ def test_derive_index(payload):
     assert idx["avg_latency_ms"] == pytest.approx(900.0, abs=0.5)
 
 
+def test_derive_index_stringified_timestamps(payload):
+    # Some payloads stringify the call dates. A plain ``end > start`` on strings
+    # compares lexicographically (so it passes) and the subtraction then raised
+    # TypeError, 500-ing ingest. Coerce and still get the right duration.
+    p = dict(payload)
+    p["call_start_date"] = str(payload["call_start_date"])
+    p["call_end_date"] = str(payload["call_end_date"])
+    idx = enrich.derive_index(p, received_at_us=1)
+    assert idx["duration_s"] == pytest.approx(90.0, abs=0.1)
+    # unparseable / missing dates degrade to None rather than raising
+    bad = dict(payload, call_start_date="", call_end_date="nonsense",
+               ai_start_date=None, ai_end_date=None)
+    assert enrich.derive_index(bad, received_at_us=1)["duration_s"] is None
+
+
+def test_stringified_timestamps_render_everywhere(payload):
+    # Some payloads quote every microsecond timestamp. Every view model must still
+    # build: a bare ``end > start`` on strings passes (lexicographic) and the
+    # arithmetic then raises TypeError, which used to 500 ingest and the detail page.
+    def stringify(o):
+        if isinstance(o, dict):
+            return {k: stringify(v) for k, v in o.items()}
+        if isinstance(o, list):
+            return [stringify(v) for v in o]
+        if isinstance(o, int) and not isinstance(o, bool) and o > 1_000_000_000_000_000:
+            return str(o)
+        return o
+
+    p = stringify(payload)
+    assert enrich.derive_index(p, received_at_us=1)["duration_s"] == pytest.approx(90.0, abs=0.1)
+    assert enrich.totals(p)["duration_s"] == pytest.approx(90.0, abs=0.1)
+    assert enrich.build_waterfall(p)["span"] > 0
+    for fn in (enrich.build_transcript, enrich.build_timeline, enrich.build_trace,
+               enrich.build_events, enrich.build_functions, enrich.latency_series,
+               enrich.wave_markers, enrich.call_facts, enrich.summary):
+        fn(p)  # must not raise
+    assert enrich.as_us("123") == 123.0 and enrich.as_us("junk") is None
+    assert enrich.as_us(None) is None and enrich.as_us("") is None
+
+
 def test_transcript_perf_matched_by_text(payload):
     turns = enrich.build_transcript(payload)
     assert len(turns) == len(payload["call_log"])

@@ -61,25 +61,52 @@ LATENCY_TIERS = ("latency", "utterance_latency", "audio_latency", "acoustic_late
 # Time helpers (payload timestamps are microseconds since the epoch, UTC)
 # --------------------------------------------------------------------------- #
 
+def as_us(value) -> Optional[float]:
+    """Coerce a payload timestamp to numeric micros, or None.
+
+    Payloads are inconsistent: the same field arrives as an int on one call and a
+    quoted string on another (and occasionally as junk). Every time helper funnels
+    through this so a stringified stamp renders instead of raising TypeError deep
+    in a view.
+    """
+    if value is None or isinstance(value, bool) or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _num(value) -> Optional[float]:
+    """Any payload number as a float, or None. Same defensive coercion as
+    :func:`as_us` but for durations/latencies, which are also inconsistently
+    stringified across payloads."""
+    return as_us(value)
+
+
 def us_to_dt(us: Optional[int]) -> Optional[datetime]:
+    us = as_us(us)
     if not us:
         return None
     return datetime.fromtimestamp(us / 1_000_000, tz=timezone.utc)
 
 
 def fmt_ts(us: Optional[int], fmt: str = "%Y-%m-%d %H:%M:%S") -> str:
+    us = as_us(us)
     dt = us_to_dt(us)
     if dt is None:
         return ""
     # include centiseconds for sub-second ordering, like the old viewer
-    return dt.strftime(fmt) + f".{(us % 1_000_000) // 10_000:02d}"
+    return dt.strftime(fmt) + f".{int(us % 1_000_000) // 10_000:02d}"
 
 
 def us_to_s(us: Optional[int]) -> Optional[float]:
+    us = as_us(us)
     return None if not us else us / 1_000_000
 
 
 def fmt_elapsed(old_us: Optional[int], new_us: Optional[int]) -> str:
+    old_us, new_us = as_us(old_us), as_us(new_us)
     if not old_us or not new_us:
         return ""
     diff = (new_us - old_us) / 1_000_000
@@ -198,11 +225,22 @@ def _has_errors(call_log: list) -> bool:
 
 def _call_window(payload: dict):
     """Best (start, end) micros for the call. Falls back to the AI-session
-    window when ``call_end_date`` is missing or zero (some payloads omit it)."""
-    s, e = payload.get("call_start_date"), payload.get("call_end_date")
+    window when ``call_end_date`` is missing or zero (some payloads omit it).
+
+    Timestamps are coerced to numbers: some payloads stringify them, and a plain
+    ``e > s`` on strings compares lexicographically (so it passes) but the caller's
+    subtraction then raises TypeError, 500-ing ingest.
+    """
+    def _num(v):
+        try:
+            return float(v) if v not in (None, "") else None
+        except (TypeError, ValueError):
+            return None
+
+    s, e = _num(payload.get("call_start_date")), _num(payload.get("call_end_date"))
     if s and e and e > s:
         return s, e
-    ai_s, ai_e = payload.get("ai_start_date"), payload.get("ai_end_date")
+    ai_s, ai_e = _num(payload.get("ai_start_date")), _num(payload.get("ai_end_date"))
     if ai_s and ai_e and ai_e > ai_s:
         return ai_s, ai_e
     return None, None
@@ -258,8 +296,14 @@ def derive_index(payload: dict, received_at_us: int) -> dict:
 def _latency_tiers(entry: dict) -> dict:
     # Treat 0 (and negatives) as "not measured": some payloads emit a tier on
     # every turn but leave the value at 0 when it was never actually computed.
-    return {tier: entry[tier] for tier in LATENCY_TIERS
-            if isinstance(entry.get(tier), (int, float)) and entry[tier] > 0}
+    # Values are coerced because some payloads stringify every number — an
+    # isinstance check alone would silently drop every latency on those calls.
+    out = {}
+    for tier in LATENCY_TIERS:
+        v = _num(entry.get(tier))
+        if v is not None and v > 0:
+            out[tier] = round(v) if float(v).is_integer() else v
+    return out
 
 
 def _tool_call_summary(entry: dict) -> list:
@@ -302,11 +346,13 @@ def build_transcript(payload: dict, source: str = "blessed") -> list:
                 continue
             if text == norm or norm.startswith(text) or text.startswith(norm):
                 item[2] = True
+                # coerced: templates format these numerically and some payloads
+                # stringify every number
                 return {
-                    "answer_time": t.get("answer_time"),
-                    "tps": t.get("tps") or t.get("avg_tps"),
-                    "tokens": t.get("tokens"),
-                    "words": t.get("response_word_count"),
+                    "answer_time": _num(t.get("answer_time")),
+                    "tps": _num(t.get("tps") or t.get("avg_tps")),
+                    "tokens": _num(t.get("tokens")),
+                    "words": _num(t.get("response_word_count")),
                 }
         return None
 
@@ -350,8 +396,9 @@ def build_transcript(payload: dict, source: str = "blessed") -> list:
 
         elif role == "user":
             turn["speaker"] = "human"
-            if isinstance(e.get("confidence"), (int, float)):
-                turn["confidence"] = e["confidence"] * 100
+            _conf = _num(e.get("confidence"))
+            if _conf is not None:
+                turn["confidence"] = _conf * 100
             # Recognized entity (email / phone / ssn / …): normalized + validated.
             ent = e.get("entity")
             if isinstance(ent, dict) and ent.get("value"):
@@ -363,10 +410,10 @@ def build_transcript(payload: dict, source: str = "blessed") -> list:
             # End-of-turn decision: how the boundary was chosen, and how sure.
             eot = e.get("eot")
             if isinstance(eot, dict) and eot.get("basis"):
-                conf = eot.get("confidence")
+                conf = _num(eot.get("confidence"))
                 turn["eot"] = {
                     "basis": eot["basis"],
-                    "confidence": conf * 100 if isinstance(conf, (int, float)) else None,
+                    "confidence": conf * 100 if conf is not None else None,
                 }
             # ASR / turn-detection timing (ms): how long finalizing this turn took.
             asr = {}
@@ -440,6 +487,7 @@ def build_timeline(payload: dict) -> list:
     out = []
     last_ts = None
     for ts, etype, details in events:
+        ts = as_us(ts)  # payloads sometimes stringify timestamps; downstream does math on these
         out.append({
             "ts": ts,
             "ts_str": fmt_ts(ts) if ts else "",
@@ -615,8 +663,8 @@ def _verdict(user_entry: dict, det_ms: float):
     """
     eot = (user_entry or {}).get("eot") or {}
     basis = eot.get("basis")
-    conf = eot.get("confidence")
-    conf_pct = conf * 100 if isinstance(conf, (int, float)) else None
+    conf = _num(eot.get("confidence"))
+    conf_pct = conf * 100 if conf is not None else None
     timing = (user_entry or {}).get("timing") or {}
     segs = timing.get("segments")
     entity = (user_entry or {}).get("entity") or {}
@@ -739,7 +787,8 @@ def _stamps_of(entry: dict) -> dict:
         v = su.get(name)
         if v is None and wall_key:
             v = entry.get(wall_key)
-        if isinstance(v, (int, float)) and v > 0:
+        v = as_us(v)  # some payloads stringify every stamp
+        if v is not None and v > 0:
             out[name] = int(v)
     return out
 
@@ -841,8 +890,8 @@ def build_trace(payload: dict) -> list:
             row["caller_meta"] = {
                 "entity": ent if (ent and ent.get("value")) else None,
                 "eot": eot.get("basis"),
-                "confidence": (u.get("confidence") * 100
-                               if isinstance(u.get("confidence"), (int, float)) else None),
+                "confidence": ((_num(u.get("confidence")) or 0) * 100
+                               if _num(u.get("confidence")) is not None else None),
             }
             su_u = _stamps_of(u)
             det_ms = (round((su_u["turn_decided"] - su_u["last_word_end"]) / 1000)
@@ -966,13 +1015,13 @@ def build_waterfall(payload: dict) -> dict:
             except Exception:
                 pass
         elif etype == "tool_result":
-            ex = d.get("execution_latency") or d.get("latency")
-            if isinstance(ex, (int, float)):
+            ex = _num(d.get("execution_latency") or d.get("latency"))
+            if ex is not None:
                 off, dur = max(0, off - ex), ex
         elif etype == "ai_response":
-            dur = d.get("audio_latency") or 0
+            dur = _num(d.get("audio_latency")) or 0
         elif etype == "function_call":
-            dur = d.get("duration_ms") or 0
+            dur = _num(d.get("duration_ms")) or 0
             if fi < len(funcs):
                 swaig = funcs[fi]
                 fi += 1
@@ -1195,24 +1244,26 @@ def build_functions(payload: dict) -> list:
 # --------------------------------------------------------------------------- #
 
 def totals(payload: dict) -> dict:
-    ai_start, ai_end = payload.get("ai_start_date"), payload.get("ai_end_date")
-    minutes = payload.get("total_minutes")
+    # Every figure is coerced: some payloads stringify all their numbers, and the
+    # templates format these numerically.
+    ai_start, ai_end = as_us(payload.get("ai_start_date")), as_us(payload.get("ai_end_date"))
+    minutes = _num(payload.get("total_minutes"))
     ws, we = _call_window(payload)
     return {
         "duration_s": (we - ws) / 1_000_000 if ws is not None else None,
         "ai_duration_s": (ai_end - ai_start) / 1_000_000 if (ai_start and ai_end and ai_end > ai_start) else None,
         "total_minutes": minutes,
-        "input_tokens": payload.get("total_input_tokens"),
-        "output_tokens": payload.get("total_output_tokens"),
-        "wire_input_tokens": payload.get("total_wire_input_tokens"),
-        "wire_output_tokens": payload.get("total_wire_output_tokens"),
-        "wire_input_tpm": payload.get("total_wire_input_tokens_per_minute"),
-        "wire_output_tpm": payload.get("total_wire_output_tokens_per_minute"),
-        "tts_chars": payload.get("total_tts_chars"),
-        "tts_chars_per_min": payload.get("total_tts_chars_per_min"),
-        "asr_minutes": payload.get("total_asr_minutes"),
-        "asr_cost_factor": payload.get("total_asr_cost_factor"),
-        "est_ai_cost_usd": (minutes * AI_RUNTIME_USD_PER_MIN) if isinstance(minutes, (int, float)) else None,
+        "input_tokens": _num(payload.get("total_input_tokens")),
+        "output_tokens": _num(payload.get("total_output_tokens")),
+        "wire_input_tokens": _num(payload.get("total_wire_input_tokens")),
+        "wire_output_tokens": _num(payload.get("total_wire_output_tokens")),
+        "wire_input_tpm": _num(payload.get("total_wire_input_tokens_per_minute")),
+        "wire_output_tpm": _num(payload.get("total_wire_output_tokens_per_minute")),
+        "tts_chars": _num(payload.get("total_tts_chars")),
+        "tts_chars_per_min": _num(payload.get("total_tts_chars_per_min")),
+        "asr_minutes": _num(payload.get("total_asr_minutes")),
+        "asr_cost_factor": _num(payload.get("total_asr_cost_factor")),
+        "est_ai_cost_usd": (minutes * AI_RUNTIME_USD_PER_MIN) if minutes is not None else None,
     }
 
 

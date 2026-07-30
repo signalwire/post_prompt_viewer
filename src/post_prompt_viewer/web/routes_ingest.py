@@ -173,7 +173,11 @@ async def upload(request: Request):
         raise HTTPException(status_code=400, detail="not valid JSON")
     if not (isinstance(data, dict) and (data.get("call_log") or data.get("call_id"))):
         raise HTTPException(status_code=400, detail="not a post_prompt payload (needs call_log or call_id)")
-    call_id = _ingest_payload(data, settings)
+    try:
+        call_id = _ingest_payload(data, settings)
+    except Exception as exc:  # malformed-but-parseable payload -> 400, not a 500
+        log.exception("upload ingest failed")
+        raise HTTPException(status_code=400, detail=f"could not ingest payload: {exc}")
     if not call_id:
         raise HTTPException(status_code=400, detail="could not store payload")
     return {"call_id": call_id, "url": f"{settings.proxy_prefix}/c/{call_id}"}

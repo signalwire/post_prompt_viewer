@@ -23,6 +23,7 @@ _TEMPLATES = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 # --- Jinja filters -------------------------------------------------------- #
 
 def _fmt_dt(us: Optional[int], fmt: str = "%Y-%m-%d %H:%M") -> str:
+    us = enrich.as_us(us)  # payloads sometimes stringify timestamps
     if not us:
         return ""
     return datetime.fromtimestamp(us / 1_000_000, tz=timezone.utc).strftime(fmt)
