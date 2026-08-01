@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS calls (
     num_assistant_turns  INTEGER,
     num_functions        INTEGER,
     avg_latency_ms       REAL,
+    avg_acoustic_ms      REAL,
     total_minutes        REAL,
     total_input_tokens   INTEGER,
     total_output_tokens  INTEGER,
@@ -77,7 +78,8 @@ CREATE INDEX IF NOT EXISTS idx_summaries_conv ON summaries(conversation_id);
 _INDEX_COLS = (
     "call_id, app_name, caller_name, caller_number, conversation_type, "
     "start_date, end_date, duration_s, num_turns, num_user_turns, "
-    "num_assistant_turns, num_functions, avg_latency_ms, total_minutes, "
+    "num_assistant_turns, num_functions, avg_latency_ms, avg_acoustic_ms, "
+    "total_minutes, "
     "total_input_tokens, total_output_tokens, has_recording, recording_url, "
     "has_errors, has_barge, received_at"
 )
@@ -88,6 +90,7 @@ _SORTABLE = {
     "duration": "duration_s",
     "turns": "num_turns",
     "latency": "avg_latency_ms",
+    "acoustic": "avg_acoustic_ms",
 }
 
 
@@ -107,6 +110,28 @@ def _connect() -> sqlite3.Connection:
 def init_db() -> None:
     with _connect() as conn:
         conn.executescript(SCHEMA)
+        # Idempotent additive migrations. SQLite has no `ADD COLUMN IF NOT
+        # EXISTS`, so we look at PRAGMA table_info and only add what's missing.
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(calls)")}
+        if "avg_acoustic_ms" not in cols:
+            conn.execute("ALTER TABLE calls ADD COLUMN avg_acoustic_ms REAL")
+            # Backfill from the stored payload — cheap; we're not expecting
+            # millions of rows here and this only runs on the first startup
+            # after the migration.
+            for row in conn.execute(
+                "SELECT call_id, payload FROM calls WHERE avg_acoustic_ms IS NULL"
+            ).fetchall():
+                try:
+                    payload = json.loads(row["payload"])
+                except (TypeError, ValueError):
+                    continue
+                idx = enrich.derive_index(payload, 0)
+                v = idx.get("avg_acoustic_ms")
+                if v is not None:
+                    conn.execute(
+                        "UPDATE calls SET avg_acoustic_ms = ? WHERE call_id = ?",
+                        (v, row["call_id"]),
+                    )
 
 
 # --------------------------------------------------------------------------- #

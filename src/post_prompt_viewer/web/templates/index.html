@@ -67,7 +67,8 @@
         <th>App</th>
         <th>{{ sorth('duration', 'Duration') }}</th>
         <th>{{ sorth('turns', 'Turns') }}</th>
-        <th>{{ sorth('latency', 'Avg latency') }}</th>
+        <th title="last-word-end → first agent audio: caller-perceived silence">{{ sorth('acoustic', 'Mouth&#8209;to&#8209;ear' | safe) }}</th>
+        <th title="ASR-final → first agent audio: server pipeline slice only">{{ sorth('latency', 'Turn latency') }}</th>
         <th>Flags</th>
       </tr>
     </thead>
@@ -83,6 +84,7 @@
         <td class="num">{{ r.app_name }}</td>
         <td class="metric">{{ r.duration_s | fmt_dur }}</td>
         <td class="metric">{{ r.num_turns }}</td>
+        <td class="metric">{{ r.avg_acoustic_ms | fmt_ms }}</td>
         <td class="metric">{{ r.avg_latency_ms | fmt_ms }}</td>
         <td class="row-badges">
           {% if r.has_recording %}<span class="badge rec" title="Has recording">REC</span>{% endif %}

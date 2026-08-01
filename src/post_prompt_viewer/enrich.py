@@ -261,6 +261,19 @@ def derive_index(payload: dict, received_at_us: int) -> dict:
     audio_lat = [e["audio_latency"] for e in asst_turns
                  if isinstance(e.get("audio_latency"), (int, float)) and e["audio_latency"] > 0]
 
+    # Mouth-to-ear (acoustic) latency: last-word-end → first_audio, in ms.
+    # This is what the caller actually hears — the full silence between the
+    # end of their utterance and the start of the agent's response audio.
+    # audio_latency covers only the ASR-final → first_audio portion; it
+    # excludes the endpoint-detection hang, which typically dominates.
+    acoustic_ms = []
+    for e in asst_turns:
+        stamps = e.get("stamps_us") or {}
+        fa = stamps.get("first_audio")
+        lwe = stamps.get("last_word_end")
+        if isinstance(fa, (int, float)) and isinstance(lwe, (int, float)) and fa > lwe:
+            acoustic_ms.append((fa - lwe) / 1000.0)
+
     swaig = payload.get("swaig_log") or []
     tool_entries = [e for e in call_log if e.get("role") == "tool"]
 
@@ -278,6 +291,7 @@ def derive_index(payload: dict, received_at_us: int) -> dict:
         "num_assistant_turns": len(asst_turns),
         "num_functions": len(swaig) or len(tool_entries),
         "avg_latency_ms": (sum(audio_lat) / len(audio_lat)) if audio_lat else None,
+        "avg_acoustic_ms": (sum(acoustic_ms) / len(acoustic_ms)) if acoustic_ms else None,
         "total_minutes": payload.get("total_minutes"),
         "total_input_tokens": payload.get("total_input_tokens"),
         "total_output_tokens": payload.get("total_output_tokens"),
