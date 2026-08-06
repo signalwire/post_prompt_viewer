@@ -38,10 +38,13 @@ self-describing fields. This rebuild:
   expandable model thinking, tool calls, and inline system-log markers. Click any
   turn to hear that moment in the recording.
 - **Timeline** — the `call_timeline` event stream, one collapsible line per event.
-- **Latency** — a per-turn **pipeline stacked bar** (turn-detection → model TTFT →
-  utterance → audio), the user-stopped-to-AI-heard **turn latency** per turn,
-  server-reported tiers cross-checked against wav-measured numbers, and the
-  annotated waveform with turn markers.
+- **Latency** — headline KPIs are **mouth-to-ear** (caller-perceived silence:
+  `first_audio − last_word_end`) and **turn latency** (endpoint detection:
+  `eos_to_push_latency`, i.e. user stopped → we detected it), both deduped
+  per user turn per [`docs/TELEMETRY_TIMELINE.md`](docs/TELEMETRY_TIMELINE.md).
+  Per-turn view stacks the pipeline bars (turn-detection → model TTFT →
+  utterance → audio) and cross-checks server-reported tiers against
+  wav-measured numbers on the annotated waveform.
 - **Functions** — SWAIG calls with args and collapsible results / `post_response`.
 - **Telemetry** — tokens, TTS chars, ASR minutes, and cost factors.
 - **Raw** — view / download the stored payload (not embedded inline).

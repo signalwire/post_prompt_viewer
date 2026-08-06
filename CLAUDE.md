@@ -8,7 +8,23 @@ Post Prompt Viewer — a FastAPI microservice that ingests SignalWire AI Agent
 `post_prompt` payloads, stores them, and presents the conversation, telemetry,
 and recording-derived latency in a tabbed drill-down UI. It is the successor to
 the Perl `post.cgi` / `index.cgi` kept in `reference/`. The payload format is
-documented in `docs/ENRICHED_CALL_LOG.md`.
+documented in `docs/ENRICHED_CALL_LOG.md`; the unified-timeline reasoning and
+per-turn / anchor-absent semantics that drive `enrich.py`'s metrics are in
+`docs/TELEMETRY_TIMELINE.md`.
+
+## Latency vocabulary (as displayed and averaged)
+
+- **Mouth-to-ear** (`avg_acoustic_ms`) — highlighted KPI; per-turn
+  `first_audio − last_word_end`, averaged. The silence the caller actually
+  hears. Deduped by `last_word_end` (one entry per user turn, earliest
+  `first_audio`); anchor-absent responses drop out. See
+  `docs/TELEMETRY_TIMELINE.md` §1b / §1c.
+- **Turn latency** (`avg_latency_ms`) — endpoint detection
+  (`eos_to_push_latency`): user stopped → we detected it. Same dedup.
+- Individual per-turn tiers (`latency`, `utterance_latency`, `audio_latency`,
+  `acoustic_latency`) still render on the detail-page trace and are cross-
+  checked against the wav in the Recording tab; only the two averages above
+  are surfaced as headline KPIs.
 
 ## Commands
 

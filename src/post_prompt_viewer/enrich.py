@@ -263,12 +263,20 @@ def derive_index(payload: dict, received_at_us: int) -> dict:
     # end of their utterance and the start of the agent's response audio.
     # (user spoke → AI responded).
     #
-    # De-duplicate by last_word_end. When the agent emits multiple audio
-    # events off one user turn (fillers, gather sub-turns, follow-up
-    # responses), every downstream ai_response re-uses the same
-    # last_word_end stamp. The caller-perceived latency for that user turn
-    # is only the *first* agent audio to land — subsequent ones inflate
-    # the average with silence that isn't really the caller's experience.
+    # De-duplicate by last_word_end. See docs/TELEMETRY_TIMELINE.md §1b:
+    # the anchor is per user turn, not per response. When the agent emits
+    # multiple ai_response events off one user turn (fillers, gather
+    # sub-turns, chained responses after a tool call), every downstream
+    # event genuinely re-uses the same last_word_end — the caller-experience
+    # number is only the *first* agent audio to land after that turn;
+    # subsequent ones measure "time since caller stopped talking", which is
+    # a different (and usually uninteresting) quantity.
+    #
+    # Anchor-absent responses (see docs/TELEMETRY_TIMELINE.md §1c) have no
+    # last_word_end at all and therefore drop out of this loop — that is the
+    # correct handling per the producer's ANCHOR_ABSENT contract: a missing
+    # anchor beats a fabricated one, and consumers should not attribute
+    # those turns to any user turn.
     earliest_first_audio: dict[int, int] = {}
     for e in asst_turns:
         stamps = e.get("stamps_us") or {}
