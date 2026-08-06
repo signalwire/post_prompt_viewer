@@ -258,21 +258,44 @@ def derive_index(payload: dict, received_at_us: int) -> dict:
     asst_turns = [
         e for e in call_log if e.get("role") in {"assistant", "assistant-manual"} and e.get("content")
     ]
-    audio_lat = [e["audio_latency"] for e in asst_turns
-                 if isinstance(e.get("audio_latency"), (int, float)) and e["audio_latency"] > 0]
-
     # Mouth-to-ear (acoustic) latency: last-word-end → first_audio, in ms.
     # This is what the caller actually hears — the full silence between the
     # end of their utterance and the start of the agent's response audio.
-    # audio_latency covers only the ASR-final → first_audio portion; it
-    # excludes the endpoint-detection hang, which typically dominates.
-    acoustic_ms = []
+    # (user spoke → AI responded).
+    #
+    # De-duplicate by last_word_end. When the agent emits multiple audio
+    # events off one user turn (fillers, gather sub-turns, follow-up
+    # responses), every downstream ai_response re-uses the same
+    # last_word_end stamp. The caller-perceived latency for that user turn
+    # is only the *first* agent audio to land — subsequent ones inflate
+    # the average with silence that isn't really the caller's experience.
+    earliest_first_audio: dict[int, int] = {}
     for e in asst_turns:
         stamps = e.get("stamps_us") or {}
         fa = stamps.get("first_audio")
         lwe = stamps.get("last_word_end")
-        if isinstance(fa, (int, float)) and isinstance(lwe, (int, float)) and fa > lwe:
-            acoustic_ms.append((fa - lwe) / 1000.0)
+        if not (isinstance(fa, (int, float)) and isinstance(lwe, (int, float)) and fa > lwe):
+            continue
+        if lwe not in earliest_first_audio or fa < earliest_first_audio[lwe]:
+            earliest_first_audio[lwe] = int(fa)
+    acoustic_ms = [(fa - lwe) / 1000.0 for lwe, fa in earliest_first_audio.items()]
+
+    # Turn-detection latency: last-word-end → ASR final pushed. i.e.
+    # "user stopped speaking → we detected it". Measured by the
+    # eos_to_push_latency field. De-dupe the same way — one value per
+    # unique last_word_end (the first ai_response after that user turn).
+    turn_det_ms = []
+    seen_lwe: set[int] = set()
+    for e in asst_turns:
+        stamps = e.get("stamps_us") or {}
+        lwe = stamps.get("last_word_end")
+        eos = e.get("eos_to_push_latency")
+        if not (isinstance(lwe, (int, float)) and isinstance(eos, (int, float)) and eos > 0):
+            continue
+        if lwe in seen_lwe:
+            continue
+        seen_lwe.add(int(lwe))
+        turn_det_ms.append(eos)
 
     swaig = payload.get("swaig_log") or []
     tool_entries = [e for e in call_log if e.get("role") == "tool"]
@@ -290,7 +313,9 @@ def derive_index(payload: dict, received_at_us: int) -> dict:
         "num_user_turns": len(user_turns),
         "num_assistant_turns": len(asst_turns),
         "num_functions": len(swaig) or len(tool_entries),
-        "avg_latency_ms": (sum(audio_lat) / len(audio_lat)) if audio_lat else None,
+        # avg_latency_ms retained for schema/compat but now carries the
+        # endpoint-detection latency (user stopped → we detected).
+        "avg_latency_ms": (sum(turn_det_ms) / len(turn_det_ms)) if turn_det_ms else None,
         "avg_acoustic_ms": (sum(acoustic_ms) / len(acoustic_ms)) if acoustic_ms else None,
         "total_minutes": payload.get("total_minutes"),
         "total_input_tokens": payload.get("total_input_tokens"),

@@ -115,23 +115,35 @@ def init_db() -> None:
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(calls)")}
         if "avg_acoustic_ms" not in cols:
             conn.execute("ALTER TABLE calls ADD COLUMN avg_acoustic_ms REAL")
-            # Backfill from the stored payload — cheap; we're not expecting
-            # millions of rows here and this only runs on the first startup
-            # after the migration.
-            for row in conn.execute(
-                "SELECT call_id, payload FROM calls WHERE avg_acoustic_ms IS NULL"
-            ).fetchall():
+
+        # Schema version, used to trigger one-shot re-derivations when the
+        # meaning of an existing column changes.
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        if version < 3:
+            # v2: avg_latency_ms was previously audio_latency (model+TTS
+            # slice, ASR-final → first_audio). It is now eos_to_push_latency
+            # (endpoint detection — user stopped → we detected it), matching
+            # the "Turn latency" label everywhere in the UI.
+            # v3: dedupe stamps_us by last_word_end when computing both
+            # averages. When the agent emits multiple ai_response events off
+            # a single user turn (fillers / gather sub-turns / follow-ups),
+            # every downstream event re-uses the same last_word_end, so the
+            # second and later ones report inflated m2e (up to tens of
+            # seconds). Only the first agent audio per user turn is the
+            # caller's real experience.
+            # Both bumps re-derive from the payload, so we do it in one
+            # pass for any row still below v3.
+            for row in conn.execute("SELECT call_id, payload FROM calls").fetchall():
                 try:
                     payload = json.loads(row["payload"])
                 except (TypeError, ValueError):
                     continue
                 idx = enrich.derive_index(payload, 0)
-                v = idx.get("avg_acoustic_ms")
-                if v is not None:
-                    conn.execute(
-                        "UPDATE calls SET avg_acoustic_ms = ? WHERE call_id = ?",
-                        (v, row["call_id"]),
-                    )
+                conn.execute(
+                    "UPDATE calls SET avg_latency_ms = ?, avg_acoustic_ms = ? WHERE call_id = ?",
+                    (idx.get("avg_latency_ms"), idx.get("avg_acoustic_ms"), row["call_id"]),
+                )
+            conn.execute("PRAGMA user_version = 3")
 
 
 # --------------------------------------------------------------------------- #

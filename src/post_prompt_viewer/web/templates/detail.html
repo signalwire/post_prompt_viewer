@@ -108,8 +108,8 @@
 <div class="kpis">
   <div class="kpi"><div class="label">Duration</div><div class="value">{{ rec.duration_s | fmt_dur }}</div></div>
   <div class="kpi"><div class="label">Turns</div><div class="value">{{ rec.num_turns }} <small>{{ rec.num_user_turns }}u / {{ rec.num_assistant_turns }}a</small></div></div>
-  <div class="kpi hl" title="last-word-end → first agent audio: the silence the caller actually hears (also called acoustic_latency)"><div class="label">Mouth&#8209;to&#8209;ear</div><div class="value">{{ rec.avg_acoustic_ms | fmt_ms }}</div></div>
-  <div class="kpi" title="ASR-final → first agent audio: server pipeline slice only; excludes endpoint-detection hang (audio_latency)"><div class="label">Turn latency</div><div class="value">{{ rec.avg_latency_ms | fmt_ms }}</div></div>
+  <div class="kpi hl" title="user spoke → AI responded: last-word-end → first agent audio (acoustic_latency)"><div class="label">Mouth&#8209;to&#8209;ear</div><div class="value">{{ rec.avg_acoustic_ms | fmt_ms }}</div></div>
+  <div class="kpi" title="user stopped speaking → we detected it: last-word-end → ASR final pushed (eos_to_push_latency)"><div class="label">Turn latency</div><div class="value">{{ rec.avg_latency_ms | fmt_ms }}</div></div>
   <div class="kpi"><div class="label">Tokens</div><div class="value tok"><span>{{ totals.input_tokens | fmt_num }} <small>in</small></span><span>{{ totals.output_tokens | fmt_num }} <small>out</small></span></div></div>
   <div class="kpi"><div class="label">Functions</div><div class="value">{{ functions | length }}</div></div>
   {% if totals.est_ai_cost_usd is not none %}<div class="kpi"><div class="label">Est. cost</div><div class="value">${{ '%.2f'|format(totals.est_ai_cost_usd) }}</div></div>{% endif %}
