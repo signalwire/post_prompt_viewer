@@ -169,6 +169,7 @@ def _analyze(call_id: str) -> None:
         file_path=str(original),
         energy_threshold=settings.energy_threshold,
         onset_peak_mult=settings.onset_peak_mult,
+        onset_rel_frac=settings.onset_rel_frac,
         min_silence_ms=settings.min_silence_ms,
     )
     results = analyzer.analyze()

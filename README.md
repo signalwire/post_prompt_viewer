@@ -97,6 +97,7 @@ All optional, read from the environment:
 | `PPV_MAX_LIST` | `500` | Max calls shown on the index |
 | `PPV_ENERGY_THRESHOLD` | `50` | latency_checker speech-energy threshold |
 | `PPV_ONSET_PEAK_MULT` | `35` | AI-onset gate = threshold × this; rejects Opus comfort-noise so the recorded onset lands on real speech, not CNG (lib default is `5`) |
+| `PPV_ONSET_REL_FRAC` | `0.10` | A segment onset must reach this fraction of that segment's peak energy; rejects pre-speech transients (codec clicks, TTS buffer artifacts) that clear the absolute gate but sit ~20 dB under the voice. `0` disables |
 | `PPV_MIN_SILENCE_MS` | `2000` | latency_checker turn-boundary silence (ms) |
 
 ## Architecture
