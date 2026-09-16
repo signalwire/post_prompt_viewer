@@ -23,9 +23,15 @@ def test_derive_index(payload):
     assert idx["app_name"] == "demo agent"
     assert idx["has_recording"] is True
     assert idx["num_user_turns"] == 2
-    assert idx["num_assistant_turns"] == 3
+    assert idx["num_assistant_turns"] == 4   # 3 spoken + the tool-wait filler
     assert idx["duration_s"] == pytest.approx(90.0, abs=0.1)
-    assert idx["avg_latency_ms"] == pytest.approx(900.0, abs=0.5)
+    # avg_latency_ms is endpoint detection (eos_to_push): (600 + 400) / 2
+    assert idx["avg_latency_ms"] == pytest.approx(500.0, abs=0.5)
+    # Mouth-to-ear is the FIRST audio of each user turn (docs/TELEMETRY_TIMELINE.md
+    # 1b). Turn 1's filler lands at 13.5s (1500 ms after the 12.0s anchor) even
+    # though it carries no anchor of its own; the response's own audio is 5000 ms
+    # later and must NOT be the reported number. Turn 2 is 2000 ms.
+    assert idx["avg_acoustic_ms"] == pytest.approx(1750.0, abs=0.5)
 
 
 def test_derive_index_stringified_timestamps(payload):

@@ -68,6 +68,7 @@
         <th>{{ sorth('duration', 'Duration') }}</th>
         <th>{{ sorth('turns', 'Turns') }}</th>
         <th title="user spoke → AI responded: last-word-end → first agent audio">{{ sorth('acoustic', 'Mouth&#8209;to&#8209;ear' | safe) }}</th>
+        <th title="avg SWAIG function_call time attributed to each user turn">{{ sorth('tool', 'Tool') }}</th>
         <th title="user stopped speaking → we detected it: last-word-end → ASR final pushed">{{ sorth('latency', 'Turn latency') }}</th>
         <th>Flags</th>
       </tr>
@@ -85,6 +86,7 @@
         <td class="metric">{{ r.duration_s | fmt_dur }}</td>
         <td class="metric">{{ r.num_turns }}</td>
         <td class="metric">{{ r.avg_acoustic_ms | fmt_ms }}</td>
+        <td class="metric">{{ r.avg_tool_ms | fmt_ms }}</td>
         <td class="metric">{{ r.avg_latency_ms | fmt_ms }}</td>
         <td class="row-badges">
           {% if r.has_recording %}<span class="badge rec" title="Has recording">REC</span>{% endif %}

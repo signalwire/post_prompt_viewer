@@ -209,15 +209,20 @@ table.calls .metric { font-family: var(--font-code); color: var(--fg-secondary);
 .detail-sub { color: var(--fg-muted); font-family: var(--font-code); font-size: 13px; word-break: break-all; }
 
 /* KPI strip */
-.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 1px;
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 1px;
   background: var(--border); border: 1px solid var(--border); border-radius: var(--radius-lg);
   overflow: hidden; margin: 16px 0; }
-.kpi { background: var(--bg-surface); padding: 14px 16px; }
-.kpi .label { font-family: var(--font-code); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--fg-muted); }
-.kpi .value { font-family: var(--font-code); font-size: 20px; color: var(--fg-default); margin-top: 4px; }
+.kpi { background: var(--bg-surface); padding: 14px 16px; min-width: 0; }
+.kpi .label { font-family: var(--font-code); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--fg-muted); white-space: nowrap; }
+.kpi .value { font-family: var(--font-code); font-size: 20px; color: var(--fg-default); margin-top: 4px; white-space: nowrap; }
 .kpi.hl .value { color: var(--sw-fuchsia); }
-.kpi .value small { font-size: 12px; color: var(--fg-muted); }
+.kpi .value small { font-size: 12px; color: var(--fg-muted); display: block; line-height: 1.2; margin-top: 1px; }
 .kpi .value.tok { display: flex; flex-direction: column; gap: 2px; font-size: 16px; line-height: 1.2; }
+.kpi .value.tok small { display: inline; }
+
+/* Copy-to-clipboard button */
+.copy-btn { transition: background 0.15s, color 0.15s; }
+.copy-btn.copied { background: var(--sw-turquoise); color: var(--bg-page); border-color: var(--sw-turquoise); }
 
 /* ---------- Tabs ---------- */
 .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin: 22px 0 0; overflow-x: auto; }

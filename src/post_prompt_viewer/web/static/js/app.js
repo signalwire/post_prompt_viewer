@@ -270,4 +270,49 @@
         .catch(function () { window.alert("Delete failed."); refresh(); });
     });
   }
+
+  // ---- Copy-to-clipboard buttons ----
+  // Any element with `data-copy="TEXT"` becomes a click-to-copy control.
+  // Falls back to a hidden textarea + execCommand when the async Clipboard
+  // API is unavailable (http:// contexts, older browsers). Flashes the
+  // button's label to "Copied" for ~1.2s on success.
+  function copyText(text) {
+    if (navigator.clipboard && window.isSecureContext) {
+      return navigator.clipboard.writeText(text);
+    }
+    return new Promise(function (resolve, reject) {
+      var ta = document.createElement("textarea");
+      ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";
+      document.body.appendChild(ta); ta.select();
+      try { document.execCommand("copy"); resolve(); }
+      catch (e) { reject(e); }
+      finally { document.body.removeChild(ta); }
+    });
+  }
+  document.addEventListener("click", function (e) {
+    var btn = e.target.closest && e.target.closest("[data-copy], [data-copy-path]");
+    if (!btn) return;
+    var text = btn.getAttribute("data-copy");
+    if (!text) {
+      // data-copy-path is a path emitted by url_for() (path-only under our
+      // reverse-proxy setup); resolve it against the current origin so
+      // pasted URLs work in the browser the user is using.
+      var p = btn.getAttribute("data-copy-path");
+      if (p) text = location.origin + p;
+    }
+    if (!text) return;
+    e.preventDefault();
+    copyText(text).then(function () {
+      var orig = btn.getAttribute("data-orig-label") || btn.innerHTML;
+      btn.setAttribute("data-orig-label", orig);
+      btn.classList.add("copied");
+      btn.innerHTML = "\u2713 Copied";
+      setTimeout(function () {
+        btn.classList.remove("copied");
+        btn.innerHTML = orig;
+      }, 1200);
+    }).catch(function () {
+      window.alert("Copy failed. The value was:\n\n" + text);
+    });
+  });
 })();

@@ -107,8 +107,12 @@
 
 <div class="kpis">
   <div class="kpi"><div class="label">Duration</div><div class="value">{{ rec.duration_s | fmt_dur }}</div></div>
-  <div class="kpi"><div class="label">Turns</div><div class="value">{{ rec.num_turns }} <small>{{ rec.num_user_turns }}u / {{ rec.num_assistant_turns }}a</small></div></div>
+  <div class="kpi" title="{{ rec.num_turns }} total turns: {{ rec.num_user_turns }} from the caller, {{ rec.num_assistant_turns }} from the agent"><div class="label">Turns</div><div class="value">{{ rec.num_turns }}<br><small>{{ rec.num_user_turns }} caller · {{ rec.num_assistant_turns }} AI</small></div></div>
   <div class="kpi hl" title="user spoke → AI responded: last-word-end → first agent audio (acoustic_latency)"><div class="label">Mouth&#8209;to&#8209;ear</div><div class="value">{{ rec.avg_acoustic_ms | fmt_ms }}</div></div>
+  {% if rec.avg_tool_ms and rec.avg_tool_ms > 0 %}
+  <div class="kpi" title="mouth-to-ear minus SWAIG/tool wait: agent's own latency (model + TTS + endpoint + queue), excluding time the caller spent waiting on function calls"><div class="label">Ex&#8209;tool m2e</div><div class="value">{{ rec.avg_acoustic_ex_tool_ms | fmt_ms }}</div></div>
+  <div class="kpi" title="average SWAIG function_call time attributed to each user turn (function ran during the H→AI silence window)"><div class="label">Tool time</div><div class="value">{{ rec.avg_tool_ms | fmt_ms }}</div></div>
+  {% endif %}
   <div class="kpi" title="user stopped speaking → we detected it: last-word-end → ASR final pushed (eos_to_push_latency)"><div class="label">Turn latency</div><div class="value">{{ rec.avg_latency_ms | fmt_ms }}</div></div>
   <div class="kpi"><div class="label">Tokens</div><div class="value tok"><span>{{ totals.input_tokens | fmt_num }} <small>in</small></span><span>{{ totals.output_tokens | fmt_num }} <small>out</small></span></div></div>
   <div class="kpi"><div class="label">Functions</div><div class="value">{{ functions | length }}</div></div>
@@ -465,9 +469,17 @@
   </div>
   <div class="card">
     <span class="eyebrow">Raw payload</span>
-    <p class="note" style="margin:8px 0 14px">{{ payload | length }} top-level keys. The full JSON is large, so it isn't rendered inline &mdash; open or download it instead.</p>
+    <p class="note" style="margin:8px 0 14px">{{ payload | length }} top-level keys. The full JSON is large, so it isn't rendered inline &mdash; open, download, or copy the link.</p>
     <a class="btn" href="{{ url_for('call_payload', call_id=rec.call_id) }}" target="_blank" rel="noopener">View JSON</a>
     <a class="btn secondary" href="{{ url_for('call_payload', call_id=rec.call_id) }}" download="{{ rec.call_id }}.json" style="margin-left:8px">Download</a>
+    <button type="button" class="btn secondary copy-btn" style="margin-left:8px"
+            data-copy-path="{{ url_for('call_payload', call_id=rec.call_id) }}"
+            title="Copy the JSON URL to clipboard"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="vertical-align:-2px;margin-right:4px"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>Copy JSON URL</button>
+    {% if rec.recording_url %}
+    <button type="button" class="btn secondary copy-btn" style="margin-left:8px"
+            data-copy="{{ rec.recording_url }}"
+            title="Copy the recording (AWS/CloudFront) URL to clipboard"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="vertical-align:-2px;margin-right:4px"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>Copy recording URL</button>
+    {% endif %}
   </div>
 </section>
 {% endblock %}

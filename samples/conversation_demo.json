@@ -87,6 +87,28 @@
       ]
     },
     {
+      "role": "system-log",
+      "action": "filler",
+      "content": "One moment while I check that.",
+      "timestamp": 1700000013400000,
+      "metadata": {
+        "filler_type": "function",
+        "text": "One moment while I check that."
+      }
+    },
+    {
+      "role": "assistant-manual",
+      "content": "One moment while I check that.",
+      "timestamp": 1700000013400000,
+      "start_timestamp": 1700000013400000,
+      "latency": 0,
+      "utterance_latency": 0,
+      "audio_latency": 0,
+      "stamps_us": {
+        "first_audio": 1700000013500000
+      }
+    },
+    {
       "role": "tool",
       "timestamp": 1700000016000000,
       "start_timestamp": 1700000013500000,
@@ -105,7 +127,16 @@
       "content": "You can add funds from the billing page in your dashboard.",
       "latency": 180,
       "utterance_latency": 500,
-      "audio_latency": 1000
+      "audio_latency": 1000,
+      "stamps_us": {
+        "last_word_end": 1700000012000000,
+        "turn_decided": 1700000012450000,
+        "status_pushed": 1700000012600000,
+        "request_detect": 1700000012650000,
+        "first_token": 1700000016200000,
+        "first_audio": 1700000017000000
+      },
+      "eos_to_push_latency": 600
     },
     {
       "role": "user",
@@ -129,7 +160,16 @@
       "content": "You're welcome. Have a great day!",
       "latency": 110,
       "utterance_latency": 450,
-      "audio_latency": 800
+      "audio_latency": 800,
+      "stamps_us": {
+        "last_word_end": 1700000026000000,
+        "turn_decided": 1700000026300000,
+        "status_pushed": 1700000026400000,
+        "request_detect": 1700000026450000,
+        "first_token": 1700000027500000,
+        "first_audio": 1700000028000000
+      },
+      "eos_to_push_latency": 400
     },
     {
       "role": "system",

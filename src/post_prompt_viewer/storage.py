@@ -35,6 +35,8 @@ CREATE TABLE IF NOT EXISTS calls (
     num_functions        INTEGER,
     avg_latency_ms       REAL,
     avg_acoustic_ms      REAL,
+    avg_tool_ms          REAL,
+    avg_acoustic_ex_tool_ms REAL,
     total_minutes        REAL,
     total_input_tokens   INTEGER,
     total_output_tokens  INTEGER,
@@ -79,6 +81,7 @@ _INDEX_COLS = (
     "call_id, app_name, caller_name, caller_number, conversation_type, "
     "start_date, end_date, duration_s, num_turns, num_user_turns, "
     "num_assistant_turns, num_functions, avg_latency_ms, avg_acoustic_ms, "
+    "avg_tool_ms, avg_acoustic_ex_tool_ms, "
     "total_minutes, "
     "total_input_tokens, total_output_tokens, has_recording, recording_url, "
     "has_errors, has_barge, received_at"
@@ -91,6 +94,7 @@ _SORTABLE = {
     "turns": "num_turns",
     "latency": "avg_latency_ms",
     "acoustic": "avg_acoustic_ms",
+    "tool": "avg_tool_ms",
 }
 
 
@@ -115,11 +119,15 @@ def init_db() -> None:
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(calls)")}
         if "avg_acoustic_ms" not in cols:
             conn.execute("ALTER TABLE calls ADD COLUMN avg_acoustic_ms REAL")
+        if "avg_tool_ms" not in cols:
+            conn.execute("ALTER TABLE calls ADD COLUMN avg_tool_ms REAL")
+        if "avg_acoustic_ex_tool_ms" not in cols:
+            conn.execute("ALTER TABLE calls ADD COLUMN avg_acoustic_ex_tool_ms REAL")
 
         # Schema version, used to trigger one-shot re-derivations when the
         # meaning of an existing column changes.
         version = conn.execute("PRAGMA user_version").fetchone()[0]
-        if version < 3:
+        if version < 6:
             # v2: avg_latency_ms was previously audio_latency (model+TTS
             # slice, ASR-final → first_audio). It is now eos_to_push_latency
             # (endpoint detection — user stopped → we detected it), matching
@@ -131,8 +139,25 @@ def init_db() -> None:
             # second and later ones report inflated m2e (up to tens of
             # seconds). Only the first agent audio per user turn is the
             # caller's real experience.
-            # Both bumps re-derive from the payload, so we do it in one
-            # pass for any row still below v3.
+            # v4: attribute function_call.duration_ms to the surrounding
+            # user turn (H→AI silence window), so we can display avg tool
+            # time per turn and an "ex-tool" adjusted mouth-to-ear that
+            # isolates the agent's own latency from SWAIG wait.
+            # v5: fix tool attribution window — was `lwe < ts <= earliest_fa`,
+            # but on filler+tool turns the earliest first_audio (the filler)
+            # fires BEFORE the SWAIG call completes, so nothing landed
+            # inside the window. Now attributed to `lwe < ts < next_lwe`
+            # (until the next user turn's last_word_end).
+            # v6: mouth-to-ear is the first agent audio of the user turn even
+            # when that audio event carries no anchor of its own. A filler
+            # emitted during a SWAIG wait has first_audio but no
+            # last_word_end, and matching the two only within one call_log
+            # entry skipped it -- reporting the later response (4172 ms on a
+            # turn where the caller heard audio at 1753 ms; the recording
+            # confirms 1750 ms). Onsets are now attributed to the anchor
+            # window [last_word_end, next last_word_end).
+            # All bumps re-derive from the payload; run once for any row
+            # still below v6.
             for row in conn.execute("SELECT call_id, payload FROM calls").fetchall():
                 try:
                     payload = json.loads(row["payload"])
@@ -140,10 +165,13 @@ def init_db() -> None:
                     continue
                 idx = enrich.derive_index(payload, 0)
                 conn.execute(
-                    "UPDATE calls SET avg_latency_ms = ?, avg_acoustic_ms = ? WHERE call_id = ?",
-                    (idx.get("avg_latency_ms"), idx.get("avg_acoustic_ms"), row["call_id"]),
+                    "UPDATE calls SET avg_latency_ms = ?, avg_acoustic_ms = ?, "
+                    "avg_tool_ms = ?, avg_acoustic_ex_tool_ms = ? WHERE call_id = ?",
+                    (idx.get("avg_latency_ms"), idx.get("avg_acoustic_ms"),
+                     idx.get("avg_tool_ms"), idx.get("avg_acoustic_ex_tool_ms"),
+                     row["call_id"]),
                 )
-            conn.execute("PRAGMA user_version = 3")
+            conn.execute("PRAGMA user_version = 6")
 
 
 # --------------------------------------------------------------------------- #

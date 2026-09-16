@@ -277,16 +277,71 @@ def derive_index(payload: dict, received_at_us: int) -> dict:
     # correct handling per the producer's ANCHOR_ABSENT contract: a missing
     # anchor beats a fabricated one, and consumers should not attribute
     # those turns to any user turn.
-    earliest_first_audio: dict[int, int] = {}
+    # An audio event does NOT have to carry the anchor on its own entry. A filler
+    # emitted while a tool runs has ``first_audio`` but no ``last_word_end``, and
+    # it is usually the FIRST thing the caller hears on that turn. Matching only
+    # within one entry therefore skipped the filler and reported the later
+    # response: 4172 ms on a turn where the caller heard audio at 1753 ms (the
+    # recording confirms 1750 ms). So collect the caller-turn anchors and every
+    # audio onset separately, then attribute each onset to the anchor window
+    # ``[anchor, next_anchor)`` it lands in.
+    anchors: list[int] = []
+    onsets: list[int] = []
     for e in asst_turns:
         stamps = e.get("stamps_us") or {}
-        fa = stamps.get("first_audio")
-        lwe = stamps.get("last_word_end")
-        if not (isinstance(fa, (int, float)) and isinstance(lwe, (int, float)) and fa > lwe):
-            continue
-        if lwe not in earliest_first_audio or fa < earliest_first_audio[lwe]:
-            earliest_first_audio[lwe] = int(fa)
+        lwe, fa = stamps.get("last_word_end"), stamps.get("first_audio")
+        if isinstance(lwe, (int, float)):
+            anchors.append(int(lwe))
+        if isinstance(fa, (int, float)):
+            onsets.append(int(fa))
+    anchors, onsets = sorted(set(anchors)), sorted(set(onsets))
+    earliest_first_audio: dict[int, int] = {}
+    for i, anchor in enumerate(anchors):
+        nxt = anchors[i + 1] if i + 1 < len(anchors) else None
+        for o in onsets:
+            if o > anchor and (nxt is None or o < nxt):
+                earliest_first_audio[anchor] = o
+                break
     acoustic_ms = [(fa - lwe) / 1000.0 for lwe, fa in earliest_first_audio.items()]
+
+    # Per-user-turn tool time: sum of function_call.duration_ms events
+    # attributed to this turn — i.e. ran between this turn's last_word_end
+    # and the next user turn's last_word_end (or end of call). Using the
+    # next-lwe boundary rather than first_audio is deliberate: on tool
+    # turns a filler often plays BEFORE the SWAIG call completes, so the
+    # earliest first_audio lands inside the tool window, not after it.
+    # Attributing to "everything before the next user turn" captures the
+    # actual tool overhead the caller waited on.
+    timeline = payload.get("call_timeline") or []
+    sorted_lwes = sorted(earliest_first_audio.keys())
+    next_lwe_of: dict[int, float] = {}
+    for i, lwe in enumerate(sorted_lwes):
+        next_lwe_of[lwe] = sorted_lwes[i + 1] if i + 1 < len(sorted_lwes) else float("inf")
+
+    per_turn_tool_ms: dict[int, float] = {}
+    for lwe in sorted_lwes:
+        boundary = next_lwe_of[lwe]
+        total = 0.0
+        for e in timeline:
+            if e.get("type") != "function_call":
+                continue
+            ts = e.get("ts")
+            dur = e.get("duration_ms")
+            if not (isinstance(ts, (int, float)) and isinstance(dur, (int, float))):
+                continue
+            if lwe < ts < boundary:
+                total += dur
+        per_turn_tool_ms[lwe] = total
+    tool_ms_list = list(per_turn_tool_ms.values())
+    # "Adjusted" mouth-to-ear: what m2e would be if the tool call cost
+    # nothing. Clamped to 0 for turns where a filler covered the tool wait
+    # (caller heard the filler at m2e, but tool_ms could still be larger —
+    # then the residual "would have been" is essentially 0 because the
+    # filler was already immediate). Averages this out across the call.
+    acoustic_ex_tool_ms = [
+        max(0.0, (fa - lwe) / 1000.0 - per_turn_tool_ms.get(lwe, 0.0))
+        for lwe, fa in earliest_first_audio.items()
+    ]
 
     # Turn-detection latency: last-word-end → ASR final pushed. i.e.
     # "user stopped speaking → we detected it". Measured by the
@@ -325,6 +380,10 @@ def derive_index(payload: dict, received_at_us: int) -> dict:
         # endpoint-detection latency (user stopped → we detected).
         "avg_latency_ms": (sum(turn_det_ms) / len(turn_det_ms)) if turn_det_ms else None,
         "avg_acoustic_ms": (sum(acoustic_ms) / len(acoustic_ms)) if acoustic_ms else None,
+        "avg_tool_ms": (sum(tool_ms_list) / len(tool_ms_list)) if tool_ms_list else None,
+        "avg_acoustic_ex_tool_ms": (
+            sum(acoustic_ex_tool_ms) / len(acoustic_ex_tool_ms)
+        ) if acoustic_ex_tool_ms else None,
         "total_minutes": payload.get("total_minutes"),
         "total_input_tokens": payload.get("total_input_tokens"),
         "total_output_tokens": payload.get("total_output_tokens"),
