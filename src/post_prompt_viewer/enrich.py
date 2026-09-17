@@ -246,6 +246,20 @@ def _call_window(payload: dict):
     return None, None
 
 
+def is_chat(payload: dict) -> bool:
+    """True for a text-chat transcript rather than a voice call.
+
+    Chat payloads set ``conversation_type: "chat"`` and carry none of the voice
+    scaffolding -- no ``SWMLVars`` / ``SWMLCall``, no recording, no per-turn
+    ``stamps_us``. Their responsiveness metric is message-to-message instead of
+    acoustic, so the UI swaps KPIs rather than rendering empty voice ones.
+    """
+    if (payload.get("conversation_type") or "").lower() == "chat":
+        return True
+    # Fallback for payloads that omit the type: chat has no voice scaffolding.
+    return not (payload.get("SWMLVars") or payload.get("SWMLCall"))
+
+
 def derive_index(payload: dict, received_at_us: int) -> dict:
     """Extract the flat, indexable summary stored alongside the raw payload."""
     call_log = payload.get("call_log") or []
@@ -287,13 +301,27 @@ def derive_index(payload: dict, received_at_us: int) -> dict:
     # ``[anchor, next_anchor)`` it lands in.
     anchors: list[int] = []
     onsets: list[int] = []
-    for e in asst_turns:
-        stamps = e.get("stamps_us") or {}
-        lwe, fa = stamps.get("last_word_end"), stamps.get("first_audio")
-        if isinstance(lwe, (int, float)):
-            anchors.append(int(lwe))
-        if isinstance(fa, (int, float)):
-            onsets.append(int(fa))
+    chat = is_chat(payload)
+    if chat:
+        # Chat has no acoustic stamps; the equivalent pair is the user's message
+        # (anchor) and the agent's next message (onset), so "reply time" falls
+        # out of the same window logic -- including the tool attribution below.
+        for e in call_log:
+            ts = as_us(e.get("timestamp"))
+            if not ts:
+                continue
+            if e.get("role") == "user" and e.get("content"):
+                anchors.append(int(ts))
+            elif e.get("role") in {"assistant", "assistant-manual"} and e.get("content"):
+                onsets.append(int(ts))
+    else:
+        for e in asst_turns:
+            stamps = e.get("stamps_us") or {}
+            lwe, fa = stamps.get("last_word_end"), stamps.get("first_audio")
+            if isinstance(lwe, (int, float)):
+                anchors.append(int(lwe))
+            if isinstance(fa, (int, float)):
+                onsets.append(int(fa))
     anchors, onsets = sorted(set(anchors)), sorted(set(onsets))
     earliest_first_audio: dict[int, int] = {}
     for i, anchor in enumerate(anchors):
@@ -325,7 +353,7 @@ def derive_index(payload: dict, received_at_us: int) -> dict:
         for e in timeline:
             if e.get("type") != "function_call":
                 continue
-            ts = e.get("ts")
+            ts = e.get("ts") if e.get("ts") is not None else e.get("timestamp")
             dur = e.get("duration_ms")
             if not (isinstance(ts, (int, float)) and isinstance(dur, (int, float))):
                 continue
@@ -379,7 +407,17 @@ def derive_index(payload: dict, received_at_us: int) -> dict:
         # avg_latency_ms retained for schema/compat but now carries the
         # endpoint-detection latency (user stopped → we detected).
         "avg_latency_ms": (sum(turn_det_ms) / len(turn_det_ms)) if turn_det_ms else None,
-        "avg_acoustic_ms": (sum(acoustic_ms) / len(acoustic_ms)) if acoustic_ms else None,
+        # One computation, two names: voice reports the acoustic gap
+        # (last_word_end -> first_audio), chat the message-to-message reply
+        # time. Keeping them in separate columns means neither page shows a
+        # metric that does not apply to it.
+        "avg_acoustic_ms": (
+            None if chat else (sum(acoustic_ms) / len(acoustic_ms)) if acoustic_ms else None
+        ),
+        "avg_reply_ms": (
+            ((sum(acoustic_ms) / len(acoustic_ms)) if acoustic_ms else None) if chat else None
+        ),
+        "is_chat": 1 if chat else 0,
         "avg_tool_ms": (sum(tool_ms_list) / len(tool_ms_list)) if tool_ms_list else None,
         "avg_acoustic_ex_tool_ms": (
             sum(acoustic_ex_tool_ms) / len(acoustic_ex_tool_ms)
@@ -582,7 +620,10 @@ def build_timeline(payload: dict) -> list:
     if raw:
         for ev in raw:
             ev = dict(ev)
+            # Voice keys the stamp "ts"; chat keys it "timestamp".
             ts = ev.pop("ts", None)
+            if ts is None:
+                ts = ev.pop("timestamp", None)
             etype = ev.pop("type", "event")
             events.append((ts, etype, ev))
     else:
@@ -868,6 +909,8 @@ _MILESTONE_CAT = {
     "request_detect": "llm", "first_token": "llm",
     "first_utterance": "tts", "first_audio": "audio",
     "filler_audio": "filler", "tool_start": "tool", "tool_end": "tool",
+    # chat: no acoustic stamps, so the axis is message -> reply
+    "message_sent": "caller", "reply_sent": "audio",
 }
 _MILESTONE_LABEL = {
     "speech_start": "caller started", "last_word_end": "caller's last word",
@@ -875,6 +918,7 @@ _MILESTONE_LABEL = {
     "request_detect": "LLM dispatched", "first_token": "first token",
     "first_utterance": "first utterance", "first_audio": "first audio",
     "filler_audio": "filler audio", "tool_start": "function start", "tool_end": "function done",
+    "message_sent": "user sent", "reply_sent": "agent replied",
 }
 # Label for the span *leading into* each milestone (the gap before it).
 _GAP_LABEL = {
@@ -910,6 +954,7 @@ def build_trace(payload: dict) -> list:
     call_log = payload.get("call_log") or []
     record_start = _record_start(payload)
     funcs = build_functions(payload)
+    chat_mode = is_chat(payload)
     ppd = payload.get("post_prompt_data") or {}
     summary_texts = {(ppd.get(k) or "").strip() for k in ("raw", "substituted")} - {""}
 
@@ -956,6 +1001,18 @@ def build_trace(payload: dict) -> list:
                 for n in ("request_detect", "first_token", "first_utterance", "first_audio"):
                     if n in su:
                         pts.append((su[n], n, _MILESTONE_CAT[n]))
+
+        if chat_mode:
+            # Chat carries no acoustic stamps, so the exchange axis is the
+            # user's message and the agent's reply. span_ms then equals the
+            # reply time and hero_ms falls back to it, which is the right
+            # headline for a text conversation.
+            u_ts = as_us((u or {}).get("timestamp"))
+            if u_ts:
+                pts.append((int(u_ts), "message_sent", _MILESTONE_CAT["message_sent"]))
+            first_ai = next((as_us(x.get("timestamp")) for x in g["ai"] if as_us(x.get("timestamp"))), None)
+            if first_ai:
+                pts.append((int(first_ai), "reply_sent", _MILESTONE_CAT["reply_sent"]))
 
         tools = []
         for t in g["tools"]:
@@ -1040,8 +1097,12 @@ def build_trace(payload: dict) -> list:
             fa = next((t for (t, n, _c) in reversed(pts) if n in ("first_audio", "filler_audio")), None)
             sstart = next((t for (t, n, _c) in pts if n == "speech_start"), None)
             row["hero_ms"] = round((fa - lwe) / 1000) if (lwe and fa) else round(span / 1000)
-            row["speed"] = _speed(row["hero_ms"])
-            row["anchored"] = lwe is not None
+            if chat_mode and not u:
+                # Agent-initiated opener: no user message precedes it, so there
+                # is no reply time to report (cf. ANCHOR_ABSENT for voice).
+                row["hero_ms"] = None
+            row["speed"] = _speed(row["hero_ms"]) if row["hero_ms"] is not None else "na"
+            row["anchored"] = lwe is not None if not chat_mode else bool(u)
             if sstart and lwe:
                 row["talk_ms"] = round((lwe - sstart) / 1000)
         out.append(row)
@@ -1292,10 +1353,11 @@ def build_events(payload: dict) -> list:
     for e in payload.get("call_log") or []:
         if e.get("role") != "system-log":
             continue
-        etype = e.get("action") or "event"
+        d = e.get("metadata") or {}
+        # Voice names the event in "action"; chat nests it as metadata.type.
+        etype = e.get("action") or d.get("type") or "event"
         if EVENT_CAT.get(etype) == "edit":
             continue
-        d = e.get("metadata") or {}
         ts = e.get("timestamp")
         item = {
             "ts_str": fmt_ts(ts) if ts else "",
@@ -1341,6 +1403,28 @@ def build_functions(payload: dict) -> list:
             "post_response": s.get("post_response"),
             "result": (tool_entries[i].get("content") if i < len(tool_entries) else None),
             "latency": latency,
+        })
+    if out:
+        return out
+    # Chat payloads have no swaig_log: the calls only appear as function_call
+    # timeline events (name + duration_ms), with results in the tool entries.
+    # Rebuild from those so the Functions tab is not empty on a chat that
+    # demonstrably called tools.
+    calls = [ev for ev in build_timeline(payload) if ev["type"] == "function_call"]
+    for i, ev in enumerate(calls):
+        d = ev["details"] or {}
+        dur = _num(d.get("duration_ms"))
+        te = tool_entries[i] if i < len(tool_entries) else None
+        out.append({
+            "name": d.get("function"),
+            "args": _loads(d.get("arguments")),
+            "epoch_time": None,
+            "ts_str": ev["ts_str"],
+            "url": d.get("url"),
+            "active_count": None,
+            "post_response": None,
+            "result": te.get("content") if te else None,
+            "latency": {"function_latency": round(dur)} if dur else {},
         })
     return out
 

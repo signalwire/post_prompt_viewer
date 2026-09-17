@@ -153,6 +153,7 @@ code, pre, .mono { font-family: var(--font-code); }
   border: 1px solid var(--border); color: var(--fg-muted); background: var(--bg-raised);
 }
 .badge.rec { color: var(--sw-fuchsia); border-color: rgba(247, 42, 114, 0.35); }
+.badge.chat { color: var(--sw-purple); border-color: rgba(96, 27, 230, 0.45); }
 .badge.warn { color: var(--sw-gold); border-color: rgba(255, 215, 0, 0.35); }
 .badge.barge { color: var(--sw-turquoise); border-color: rgba(64, 224, 208, 0.35); }
 

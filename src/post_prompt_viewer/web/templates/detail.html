@@ -97,7 +97,8 @@
 <div class="detail-head">
   <a class="back" href="{{ url_for('index') }}">← all conversations</a>
   <div class="detail-title">
-    <h1>{{ rec.caller_name or rec.caller_number or 'Conversation' }}</h1>
+    <h1>{{ rec.caller_name or rec.caller_number or ('Chat' if rec.is_chat else 'Conversation') }}</h1>
+    {% if rec.is_chat %}<span class="badge chat" title="text chat, not a voice call — no audio, so no acoustic latency or recording">CHAT</span>{% endif %}
     {% if rec.has_recording %}<span class="badge rec">REC</span>{% endif %}
     {% if rec.has_errors %}<span class="badge warn">ERR</span>{% endif %}
     {% if rec.has_barge %}<span class="badge barge">BARGE</span>{% endif %}
@@ -107,6 +108,16 @@
 
 <div class="kpis">
   <div class="kpi"><div class="label">Duration</div><div class="value">{{ rec.duration_s | fmt_dur }}</div></div>
+  {% if rec.is_chat %}
+  {# Chat has no audio: acoustic latency, endpoint detection and TTS/ASR
+     metrics do not exist. The equivalent responsiveness number is
+     message-to-message, so we show that instead of empty voice KPIs. #}
+  <div class="kpi" title="{{ rec.num_turns }} messages: {{ rec.num_user_turns }} from the user, {{ rec.num_assistant_turns }} from the agent"><div class="label">Messages</div><div class="value">{{ rec.num_turns }}<br><small>{{ rec.num_user_turns }} user · {{ rec.num_assistant_turns }} AI</small></div></div>
+  <div class="kpi hl" title="user message → agent's next message (averaged). The chat equivalent of mouth-to-ear; there is no audio to measure."><div class="label">Reply time</div><div class="value">{{ rec.avg_reply_ms | fmt_ms }}</div></div>
+  {% if rec.avg_tool_ms and rec.avg_tool_ms > 0 %}
+  <div class="kpi" title="average SWAIG function_call time attributed to each user message (ran between the message and the reply)"><div class="label">Tool time</div><div class="value">{{ rec.avg_tool_ms | fmt_ms }}</div></div>
+  {% endif %}
+  {% else %}
   <div class="kpi" title="{{ rec.num_turns }} total turns: {{ rec.num_user_turns }} from the caller, {{ rec.num_assistant_turns }} from the agent"><div class="label">Turns</div><div class="value">{{ rec.num_turns }}<br><small>{{ rec.num_user_turns }} caller · {{ rec.num_assistant_turns }} AI</small></div></div>
   <div class="kpi hl" title="user spoke → AI responded: last-word-end → first agent audio (acoustic_latency)"><div class="label">Mouth&#8209;to&#8209;ear</div><div class="value">{{ rec.avg_acoustic_ms | fmt_ms }}</div></div>
   {% if rec.avg_tool_ms and rec.avg_tool_ms > 0 %}
@@ -114,6 +125,7 @@
   <div class="kpi" title="average SWAIG function_call time attributed to each user turn (function ran during the H→AI silence window)"><div class="label">Tool time</div><div class="value">{{ rec.avg_tool_ms | fmt_ms }}</div></div>
   {% endif %}
   <div class="kpi" title="user stopped speaking → we detected it: last-word-end → ASR final pushed (eos_to_push_latency)"><div class="label">Turn latency</div><div class="value">{{ rec.avg_latency_ms | fmt_ms }}</div></div>
+  {% endif %}
   <div class="kpi"><div class="label">Tokens</div><div class="value tok"><span>{{ totals.input_tokens | fmt_num }} <small>in</small></span><span>{{ totals.output_tokens | fmt_num }} <small>out</small></span></div></div>
   <div class="kpi"><div class="label">Functions</div><div class="value">{{ functions | length }}</div></div>
   {% if totals.est_ai_cost_usd is not none %}<div class="kpi"><div class="label">Est. cost</div><div class="value">${{ '%.2f'|format(totals.est_ai_cost_usd) }}</div></div>{% endif %}
@@ -133,7 +145,7 @@
 
 <nav class="tabs" role="tablist">
   <button class="tab" data-tab="overview" role="tab" aria-selected="true">Overview</button>
-  <button class="tab" data-tab="conversation" role="tab">Conversation <span class="tab-count">{{ rec.num_turns }}</span></button>
+  <button class="tab" data-tab="conversation" role="tab">{{ 'Messages' if rec.is_chat else 'Conversation' }} <span class="tab-count">{{ rec.num_turns }}</span></button>
   <button class="tab" data-tab="latency" role="tab">Timeline <span class="tab-count">{{ trace | length }}</span></button>
   {% if rec.has_recording %}<button class="tab" data-tab="recording" role="tab">Recording</button>{% endif %}
   <button class="tab" data-tab="telemetry" role="tab">Data</button>
@@ -188,10 +200,14 @@
   {% endif %}
 
   <div class="card">
-    <h3>Call</h3>
+    <h3>{{ 'Session' if rec.is_chat else 'Call' }}</h3>
     <dl class="kv">
+      {# A chat has no caller id / phone number; showing empty voice rows just
+         implies data is missing rather than inapplicable. #}
+      {% if not rec.is_chat %}
       <dt>Caller</dt><dd>{{ rec.caller_name or '—' }}</dd>
       <dt>Number</dt><dd>{{ rec.caller_number or '—' }}</dd>
+      {% endif %}
       <dt>App</dt><dd>{{ rec.app_name or '—' }}</dd>
       <dt>Type</dt><dd>{{ rec.conversation_type or '—' }}</dd>
       <dt>Started</dt><dd>{{ rec.start_date | fmt_dt('%Y-%m-%d %H:%M:%S UTC') }}</dd>
@@ -245,7 +261,7 @@
             {% if r.caller_meta and r.caller_meta.entity %}<span class="chip entity ok">{{ r.caller_meta.entity.type }} <b>{{ r.caller_meta.entity.value }}</b></span>{% endif %}
             {% if r.caller_meta and r.caller_meta.confidence is not none %}<span class="chip">conf <b>{{ '%.0f' | format(r.caller_meta.confidence) }}%</b></span>{% endif %}
           </div>
-          {% if r.hero_ms is not none %}<div class="tr-hero">{{ r.hero_ms }}<span class="u">ms</span>{% if r.speed == 'fast' %} <span class="tr-zap">&#9889;</span>{% endif %}<small>{{ 'mouth-to-ear' if r.anchored else 'to first audio' }}</small></div>{% endif %}
+          {% if r.hero_ms is not none %}<div class="tr-hero">{{ r.hero_ms }}<span class="u">ms</span>{% if r.speed == 'fast' %} <span class="tr-zap">&#9889;</span>{% endif %}<small>{{ ('reply time' if rec.is_chat else 'mouth-to-ear') if r.anchored else ('to first message' if rec.is_chat else 'to first audio') }}</small></div>{% endif %}
         </div>
 
         {% if r.verdict %}<div class="tr-verdict vk-{{ r.verdict_kind }}">{{ vicon.get(r.verdict_kind, '·') }} {{ r.verdict }}</div>{% endif %}
@@ -433,7 +449,7 @@
   <div class="card">
     <h3>Call</h3>
     <div class="facts">
-      {% set fact_groups = [('Identity', call_facts.identity), ('Caller &amp; routing', call_facts.routing), ('Recording', call_facts.recording), ('Timing', call_facts.timing)] %}
+      {% set fact_groups = [('Identity', call_facts.identity), (('User' if rec.is_chat else 'Caller &amp; routing'), call_facts.routing), ('Recording', call_facts.recording), ('Timing', call_facts.timing)] %}
       {% for title, rows in fact_groups %}{% if rows %}
       <div class="facts-col">
         <span class="eyebrow">{{ title | safe }}</span>
@@ -447,12 +463,16 @@
   <div class="card">
     <h3>Usage</h3>
     <div class="stat-grid">
+      {# TTS/ASR/wire-minute accounting is voice-only; a chat payload carries
+         none of it, so these render as blanks rather than zeros. Skip them. #}
+      {% if not rec.is_chat %}
       <div class="stat"><div class="label">Total minutes</div><div class="value">{{ totals.total_minutes | fmt_num }}</div></div>
       <div class="stat"><div class="label">Wire tokens in</div><div class="value">{{ totals.wire_input_tokens | fmt_num }} <span class="per">/ {{ totals.wire_input_tpm | fmt_num }} pm</span></div></div>
       <div class="stat"><div class="label">Wire tokens out</div><div class="value">{{ totals.wire_output_tokens | fmt_num }} <span class="per">/ {{ totals.wire_output_tpm | fmt_num }} pm</span></div></div>
       <div class="stat"><div class="label">TTS chars</div><div class="value">{{ totals.tts_chars | fmt_num }} <span class="per">/ {{ totals.tts_chars_per_min | fmt_num }} pm</span></div></div>
       <div class="stat"><div class="label">ASR minutes</div><div class="value">{{ (totals.asr_minutes or 0) | round(2) }} <span class="per">× {{ (totals.asr_cost_factor or 0) | round(2) }}</span></div></div>
       <div class="stat"><div class="label">AI duration</div><div class="value">{{ totals.ai_duration_s | fmt_dur }}</div></div>
+      {% endif %}
     </div>
   </div>
   {% if global_data %}

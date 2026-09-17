@@ -37,6 +37,8 @@ CREATE TABLE IF NOT EXISTS calls (
     avg_acoustic_ms      REAL,
     avg_tool_ms          REAL,
     avg_acoustic_ex_tool_ms REAL,
+    avg_reply_ms         REAL,
+    is_chat              INTEGER,
     total_minutes        REAL,
     total_input_tokens   INTEGER,
     total_output_tokens  INTEGER,
@@ -82,6 +84,7 @@ _INDEX_COLS = (
     "start_date, end_date, duration_s, num_turns, num_user_turns, "
     "num_assistant_turns, num_functions, avg_latency_ms, avg_acoustic_ms, "
     "avg_tool_ms, avg_acoustic_ex_tool_ms, "
+    "avg_reply_ms, is_chat, "
     "total_minutes, "
     "total_input_tokens, total_output_tokens, has_recording, recording_url, "
     "has_errors, has_barge, received_at"
@@ -94,6 +97,7 @@ _SORTABLE = {
     "turns": "num_turns",
     "latency": "avg_latency_ms",
     "acoustic": "avg_acoustic_ms",
+    "reply": "avg_reply_ms",
     "tool": "avg_tool_ms",
 }
 
@@ -123,11 +127,15 @@ def init_db() -> None:
             conn.execute("ALTER TABLE calls ADD COLUMN avg_tool_ms REAL")
         if "avg_acoustic_ex_tool_ms" not in cols:
             conn.execute("ALTER TABLE calls ADD COLUMN avg_acoustic_ex_tool_ms REAL")
+        if "avg_reply_ms" not in cols:
+            conn.execute("ALTER TABLE calls ADD COLUMN avg_reply_ms REAL")
+        if "is_chat" not in cols:
+            conn.execute("ALTER TABLE calls ADD COLUMN is_chat INTEGER")
 
         # Schema version, used to trigger one-shot re-derivations when the
         # meaning of an existing column changes.
         version = conn.execute("PRAGMA user_version").fetchone()[0]
-        if version < 6:
+        if version < 7:
             # v2: avg_latency_ms was previously audio_latency (model+TTS
             # slice, ASR-final → first_audio). It is now eos_to_push_latency
             # (endpoint detection — user stopped → we detected it), matching
@@ -156,8 +164,11 @@ def init_db() -> None:
             # turn where the caller heard audio at 1753 ms; the recording
             # confirms 1750 ms). Onsets are now attributed to the anchor
             # window [last_word_end, next last_word_end).
+            # v7: text-chat transcripts are detected (is_chat) and get a
+            # message-to-message avg_reply_ms instead of the acoustic
+            # mouth-to-ear, which does not exist for them.
             # All bumps re-derive from the payload; run once for any row
-            # still below v6.
+            # still below v7.
             for row in conn.execute("SELECT call_id, payload FROM calls").fetchall():
                 try:
                     payload = json.loads(row["payload"])
@@ -166,12 +177,14 @@ def init_db() -> None:
                 idx = enrich.derive_index(payload, 0)
                 conn.execute(
                     "UPDATE calls SET avg_latency_ms = ?, avg_acoustic_ms = ?, "
-                    "avg_tool_ms = ?, avg_acoustic_ex_tool_ms = ? WHERE call_id = ?",
+                    "avg_tool_ms = ?, avg_acoustic_ex_tool_ms = ?, "
+                    "avg_reply_ms = ?, is_chat = ? WHERE call_id = ?",
                     (idx.get("avg_latency_ms"), idx.get("avg_acoustic_ms"),
                      idx.get("avg_tool_ms"), idx.get("avg_acoustic_ex_tool_ms"),
+                     idx.get("avg_reply_ms"), idx.get("is_chat"),
                      row["call_id"]),
                 )
-            conn.execute("PRAGMA user_version = 6")
+            conn.execute("PRAGMA user_version = 7")
 
 
 # --------------------------------------------------------------------------- #

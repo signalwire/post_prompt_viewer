@@ -89,7 +89,7 @@
         <td class="metric">{{ r.avg_tool_ms | fmt_ms }}</td>
         <td class="metric">{{ r.avg_latency_ms | fmt_ms }}</td>
         <td class="row-badges">
-          {% if r.has_recording %}<span class="badge rec" title="Has recording">REC</span>{% endif %}
+          {% if r.is_chat %}<span class="badge chat" title="Text chat, not a voice call">CHAT</span>{% endif %}{% if r.has_recording %}<span class="badge rec" title="Has recording">REC</span>{% endif %}
           {% if r.has_errors %}<span class="badge warn" title="Has errors">ERR</span>{% endif %}
           {% if r.has_barge %}<span class="badge barge" title="Barge-in">BARGE</span>{% endif %}
         </td>

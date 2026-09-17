@@ -74,6 +74,68 @@ def test_stringified_timestamps_render_everywhere(payload):
     assert enrich.as_us(None) is None and enrich.as_us("") is None
 
 
+def test_chat_payload_uses_message_metrics():
+    # A chat transcript has no voice scaffolding: no SWMLVars/SWMLCall, no
+    # recording, no stamps_us. Its responsiveness metric is message-to-message,
+    # and the acoustic one must stay None rather than reading as 0.
+    base = 1_700_000_000_000_000
+    payload = {
+        "call_id": "chat-0001",
+        "conversation_type": "chat",
+        "app_name": "ai_chat",
+        "call_start_date": base,
+        "call_end_date": base + 60_000_000,
+        "call_log": [
+            {"role": "assistant", "content": "Hi, I'm the agent.", "timestamp": base},
+            {"role": "user", "content": "hello", "timestamp": base + 10_000_000},
+            {"role": "assistant", "content": "Hello there!", "timestamp": base + 10_600_000},
+            {"role": "user", "content": "look something up", "timestamp": base + 20_000_000},
+            # chat system-logs nest the event type in metadata.type (voice uses "action")
+            {"role": "system-log", "content": "Session started", "timestamp": base,
+             "metadata": {"type": "session_start", "model": "gpt-4o-mini"}},
+            {"role": "system-log", "content": "SWAIG function search_knowledge called",
+             "timestamp": base + 21_000_000,
+             "metadata": {"type": "function_call", "function": "search_knowledge",
+                          "duration_ms": 900}},
+            {"role": "tool", "content": "results", "timestamp": base + 21_000_000},
+            {"role": "assistant", "content": "Here you go.", "timestamp": base + 23_000_000},
+        ],
+        # chat keys the timeline stamp "timestamp" and the type in metadata,
+        # where voice uses "ts" and "action"
+        "call_timeline": [
+            {"type": "session_start", "timestamp": base, "model": "gpt-4o-mini"},
+            {"type": "function_call", "timestamp": base + 21_000_000,
+             "function": "search_knowledge", "duration_ms": 900},
+        ],
+    }
+    assert enrich.is_chat(payload) is True
+    idx = enrich.derive_index(payload, received_at_us=1)
+    assert idx["is_chat"] == 1
+    assert idx["avg_acoustic_ms"] is None          # no audio to measure
+    # reply times: 600 ms and 3000 ms
+    assert idx["avg_reply_ms"] == pytest.approx(1800.0, abs=1)
+    assert idx["avg_tool_ms"] == pytest.approx(450.0, abs=1)   # 900 ms on one of two turns
+
+    # the timeline/events/functions paths must read chat's key names
+    assert all(ev["ts"] for ev in enrich.build_timeline(payload))
+    types = {e["type"] for e in enrich.build_events(payload)}
+    assert "session_start" in types and "function_call" in types
+    fns = enrich.build_functions(payload)          # no swaig_log -> rebuilt from timeline
+    assert [f["name"] for f in fns] == ["search_knowledge"]
+    assert fns[0]["latency"] == {"function_latency": 900}
+
+    # trace headline is the reply time; the agent-initiated opener has none
+    heroes = [r["hero_ms"] for r in enrich.build_trace(payload)]
+    assert heroes[0] is None and heroes[1:] == [600, 3000]
+
+
+def test_voice_payload_is_not_chat(payload):
+    assert enrich.is_chat(payload) is False
+    idx = enrich.derive_index(payload, received_at_us=1)
+    assert idx["is_chat"] == 0 and idx["avg_reply_ms"] is None
+    assert idx["avg_acoustic_ms"] is not None
+
+
 def test_transcript_perf_matched_by_text(payload):
     turns = enrich.build_transcript(payload)
     assert len(turns) == len(payload["call_log"])
