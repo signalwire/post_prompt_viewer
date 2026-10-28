@@ -246,18 +246,55 @@ def _call_window(payload: dict):
     return None, None
 
 
-def is_chat(payload: dict) -> bool:
-    """True for a text-chat transcript rather than a voice call.
+# A user turn that arrived as speech is tagged by the producer; typed turns
+# carry no content_type. Verified across the corpus: every voice payload is
+# 100% "Detected Speech" and the chat payload 0%, so this is the reliable
+# per-turn discriminator -- and the only thing that can describe a payload
+# holding BOTH (a chat session that escalated to a call, concatenated into one
+# post_prompt).
+_SPOKEN_CONTENT_TYPE = "Detected Speech"
 
-    Chat payloads set ``conversation_type: "chat"`` and carry none of the voice
-    scaffolding -- no ``SWMLVars`` / ``SWMLCall``, no recording, no per-turn
-    ``stamps_us``. Their responsiveness metric is message-to-message instead of
-    acoustic, so the UI swaps KPIs rather than rendering empty voice ones.
+
+def turn_mode(entry: dict) -> str:
+    """"spoken" or "typed" for a single user turn."""
+    return "spoken" if entry.get("content_type") == _SPOKEN_CONTENT_TYPE else "typed"
+
+
+def turn_mix(payload: dict) -> tuple:
+    """(spoken, typed) counts over the user turns."""
+    spoken = typed = 0
+    for e in payload.get("call_log") or []:
+        if e.get("role") == "user" and e.get("content"):
+            if turn_mode(e) == "spoken":
+                spoken += 1
+            else:
+                typed += 1
+    return spoken, typed
+
+
+def conversation_mode(payload: dict) -> str:
+    """``voice``, ``chat`` or ``hybrid`` -- which metric families apply.
+
+    Decided by the user turns themselves rather than ``conversation_type``,
+    because a hybrid is labelled ``voice`` at the top level while containing a
+    whole text session. Falls back to the declared type / voice scaffolding when
+    there are no user turns at all.
     """
+    spoken, typed = turn_mix(payload)
+    if spoken and typed:
+        return "hybrid"
+    if spoken:
+        return "voice"
+    if typed:
+        return "chat"
     if (payload.get("conversation_type") or "").lower() == "chat":
-        return True
-    # Fallback for payloads that omit the type: chat has no voice scaffolding.
-    return not (payload.get("SWMLVars") or payload.get("SWMLCall"))
+        return "chat"
+    return "voice" if (payload.get("SWMLVars") or payload.get("SWMLCall")) else "chat"
+
+
+def is_chat(payload: dict) -> bool:
+    """True for a pure text transcript (no spoken turns at all)."""
+    return conversation_mode(payload) == "chat"
 
 
 def derive_index(payload: dict, received_at_us: int) -> dict:
@@ -268,6 +305,8 @@ def derive_index(payload: dict, received_at_us: int) -> dict:
     ws, we = _call_window(payload)
     duration_s = (we - ws) / 1_000_000 if ws is not None else None
 
+    mode = conversation_mode(payload)
+    spoken_n, typed_n = turn_mix(payload)
     user_turns = [e for e in call_log if e.get("role") == "user" and e.get("content")]
     asst_turns = [
         e for e in call_log if e.get("role") in {"assistant", "assistant-manual"} and e.get("content")
@@ -299,38 +338,53 @@ def derive_index(payload: dict, received_at_us: int) -> dict:
     # recording confirms 1750 ms). So collect the caller-turn anchors and every
     # audio onset separately, then attribute each onset to the anchor window
     # ``[anchor, next_anchor)`` it lands in.
-    anchors: list[int] = []
-    onsets: list[int] = []
-    chat = is_chat(payload)
-    if chat:
-        # Chat has no acoustic stamps; the equivalent pair is the user's message
-        # (anchor) and the agent's next message (onset), so "reply time" falls
-        # out of the same window logic -- including the tool attribution below.
-        for e in call_log:
-            ts = as_us(e.get("timestamp"))
-            if not ts:
-                continue
-            if e.get("role") == "user" and e.get("content"):
-                anchors.append(int(ts))
-            elif e.get("role") in {"assistant", "assistant-manual"} and e.get("content"):
-                onsets.append(int(ts))
-    else:
-        for e in asst_turns:
-            stamps = e.get("stamps_us") or {}
-            lwe, fa = stamps.get("last_word_end"), stamps.get("first_audio")
-            if isinstance(lwe, (int, float)):
-                anchors.append(int(lwe))
-            if isinstance(fa, (int, float)):
-                onsets.append(int(fa))
-    anchors, onsets = sorted(set(anchors)), sorted(set(onsets))
-    earliest_first_audio: dict[int, int] = {}
-    for i, anchor in enumerate(anchors):
-        nxt = anchors[i + 1] if i + 1 < len(anchors) else None
-        for o in onsets:
-            if o > anchor and (nxt is None or o < nxt):
-                earliest_first_audio[anchor] = o
-                break
+    def _windows(anchors: list, onsets: list) -> dict:
+        """Earliest onset inside each ``[anchor, next_anchor)`` window.
+
+        An onset need not carry the anchor on its own entry: a filler emitted
+        during a SWAIG wait has ``first_audio`` but no ``last_word_end`` and is
+        usually the first thing the caller hears. See TELEMETRY_TIMELINE.md 1b.
+        """
+        anchors, onsets = sorted(set(anchors)), sorted(set(onsets))
+        out: dict[int, int] = {}
+        for i, anchor in enumerate(anchors):
+            nxt = anchors[i + 1] if i + 1 < len(anchors) else None
+            for o in onsets:
+                if o > anchor and (nxt is None or o < nxt):
+                    out[anchor] = o
+                    break
+        return out
+
+    # The two families are computed independently, because one payload can hold
+    # both: a chat session that escalated to a call arrives as a single
+    # post_prompt with typed turns AND spoken turns (mode "hybrid"). Gating on a
+    # payload-level flag would discard whichever half lost.
+    #
+    # voice: caller's last word -> first agent audio (acoustic / mouth-to-ear)
+    v_anchors, v_onsets = [], []
+    for e in asst_turns:
+        stamps = e.get("stamps_us") or {}
+        lwe, fa = as_us(stamps.get("last_word_end")), as_us(stamps.get("first_audio"))
+        if lwe:
+            v_anchors.append(int(lwe))
+        if fa:
+            v_onsets.append(int(fa))
+    earliest_first_audio = _windows(v_anchors, v_onsets)
     acoustic_ms = [(fa - lwe) / 1000.0 for lwe, fa in earliest_first_audio.items()]
+
+    # typed: user's message -> agent's next message (reply time)
+    t_anchors, t_onsets = [], []
+    for e in call_log:
+        ts = as_us(e.get("timestamp"))
+        if not ts:
+            continue
+        if e.get("role") == "user" and e.get("content"):
+            if turn_mode(e) == "typed":
+                t_anchors.append(int(ts))
+        elif e.get("role") in {"assistant", "assistant-manual"} and e.get("content"):
+            t_onsets.append(int(ts))
+    typed_windows = _windows(t_anchors, t_onsets)
+    reply_ms = [(r - a) / 1000.0 for a, r in typed_windows.items()]
 
     # Per-user-turn tool time: sum of function_call.duration_ms events
     # attributed to this turn — i.e. ran between this turn's last_word_end
@@ -341,7 +395,10 @@ def derive_index(payload: dict, received_at_us: int) -> dict:
     # Attributing to "everything before the next user turn" captures the
     # actual tool overhead the caller waited on.
     timeline = payload.get("call_timeline") or []
-    sorted_lwes = sorted(earliest_first_audio.keys())
+    # Attribute tool time across whichever windows exist (both, for a hybrid).
+    all_windows = dict(earliest_first_audio)
+    all_windows.update(typed_windows)
+    sorted_lwes = sorted(all_windows.keys())
     next_lwe_of: dict[int, float] = {}
     for i, lwe in enumerate(sorted_lwes):
         next_lwe_of[lwe] = sorted_lwes[i + 1] if i + 1 < len(sorted_lwes) else float("inf")
@@ -407,17 +464,14 @@ def derive_index(payload: dict, received_at_us: int) -> dict:
         # avg_latency_ms retained for schema/compat but now carries the
         # endpoint-detection latency (user stopped → we detected).
         "avg_latency_ms": (sum(turn_det_ms) / len(turn_det_ms)) if turn_det_ms else None,
-        # One computation, two names: voice reports the acoustic gap
-        # (last_word_end -> first_audio), chat the message-to-message reply
-        # time. Keeping them in separate columns means neither page shows a
-        # metric that does not apply to it.
-        "avg_acoustic_ms": (
-            None if chat else (sum(acoustic_ms) / len(acoustic_ms)) if acoustic_ms else None
-        ),
-        "avg_reply_ms": (
-            ((sum(acoustic_ms) / len(acoustic_ms)) if acoustic_ms else None) if chat else None
-        ),
-        "is_chat": 1 if chat else 0,
+        # Separate columns so a page only ever shows the metric that applies,
+        # and a hybrid can show both.
+        "avg_acoustic_ms": (sum(acoustic_ms) / len(acoustic_ms)) if acoustic_ms else None,
+        "avg_reply_ms": (sum(reply_ms) / len(reply_ms)) if reply_ms else None,
+        "mode": mode,
+        "is_chat": 1 if mode == "chat" else 0,
+        "num_spoken_turns": spoken_n,
+        "num_typed_turns": typed_n,
         "avg_tool_ms": (sum(tool_ms_list) / len(tool_ms_list)) if tool_ms_list else None,
         "avg_acoustic_ex_tool_ms": (
             sum(acoustic_ex_tool_ms) / len(acoustic_ex_tool_ms)
@@ -540,6 +594,9 @@ def build_transcript(payload: dict, source: str = "blessed") -> list:
 
         elif role == "user":
             turn["speaker"] = "human"
+            # spoken vs typed: a hybrid transcript holds both, so each turn says
+            # which it was rather than the page claiming one mode for all.
+            turn["mode"] = turn_mode(e)
             _conf = _num(e.get("confidence"))
             if _conf is not None:
                 turn["confidence"] = _conf * 100
@@ -963,15 +1020,33 @@ def build_trace(payload: dict) -> list:
     # before any user turn (the greeting) form a leading exchange with no caller.
     # system / system-log entries (step changes, session end) don't match any branch
     # so they never perturb grouping; the post-call summary is not a turn either.
-    groups, cur = [], None
+    groups, cur, between_sessions = [], None, False
     for e in call_log:
         role = e.get("role")
+        if role == "system-log":
+            # A payload can concatenate a chat session and a call into one
+            # post_prompt (mode "hybrid"). An exchange must not span that
+            # boundary, or the text session's last question gets paired with
+            # the call's opening line. Voice names the event in "action", chat
+            # nests it in metadata.type.
+            etype = e.get("action") or (e.get("metadata") or {}).get("type")
+            if etype in ("session_start", "session_end"):
+                if cur:
+                    groups.append(cur)
+                cur = None
+                # Between a session_end and the next session_start sits that
+                # session's post-call summary; it is not a turn. Only one of a
+                # hybrid's summaries matches post_prompt_data, so position is
+                # what identifies the others.
+                between_sessions = etype == "session_end"
+            continue
         if role == "user" and e.get("content"):
+            between_sessions = False
             if cur:
                 groups.append(cur)
             cur = {"user": e, "ai": [], "tools": []}
         elif role in ("assistant", "assistant-manual") and e.get("content"):
-            if (e.get("content") or "").strip() in summary_texts:
+            if (e.get("content") or "").strip() in summary_texts or between_sessions:
                 continue
             cur = cur or {"user": None, "ai": [], "tools": []}
             cur["ai"].append(e)
@@ -1002,11 +1077,12 @@ def build_trace(payload: dict) -> list:
                     if n in su:
                         pts.append((su[n], n, _MILESTONE_CAT[n]))
 
-        if chat_mode:
-            # Chat carries no acoustic stamps, so the exchange axis is the
-            # user's message and the agent's reply. span_ms then equals the
-            # reply time and hero_ms falls back to it, which is the right
-            # headline for a text conversation.
+        # A typed turn has no acoustic stamps, so its axis is the user's message
+        # and the agent's reply; span_ms then equals the reply time and hero_ms
+        # falls back to it. Decided per exchange, not per payload: a hybrid uses
+        # stamps on its spoken turns and messages on its typed ones.
+        typed_turn = (turn_mode(u) == "typed") if u else chat_mode
+        if typed_turn and not pts:
             u_ts = as_us((u or {}).get("timestamp"))
             if u_ts:
                 pts.append((int(u_ts), "message_sent", _MILESTONE_CAT["message_sent"]))
@@ -1097,12 +1173,15 @@ def build_trace(payload: dict) -> list:
             fa = next((t for (t, n, _c) in reversed(pts) if n in ("first_audio", "filler_audio")), None)
             sstart = next((t for (t, n, _c) in pts if n == "speech_start"), None)
             row["hero_ms"] = round((fa - lwe) / 1000) if (lwe and fa) else round(span / 1000)
-            if chat_mode and not u:
-                # Agent-initiated opener: no user message precedes it, so there
-                # is no reply time to report (cf. ANCHOR_ABSENT for voice).
-                row["hero_ms"] = None
+            if not u and not row.get("anchored_voice"):
+                # Agent-initiated opener with no caller anchor: nothing precedes
+                # it, so there is no reply time / mouth-to-ear to report
+                # (cf. ANCHOR_ABSENT, TELEMETRY_TIMELINE.md 1c).
+                if chat_mode or typed_turn:
+                    row["hero_ms"] = None
             row["speed"] = _speed(row["hero_ms"]) if row["hero_ms"] is not None else "na"
-            row["anchored"] = lwe is not None if not chat_mode else bool(u)
+            row["anchored"] = bool(u) if typed_turn else (lwe is not None)
+            row["typed"] = typed_turn
             if sstart and lwe:
                 row["talk_ms"] = round((lwe - sstart) / 1000)
         out.append(row)

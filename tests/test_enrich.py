@@ -86,13 +86,13 @@ def test_chat_payload_uses_message_metrics():
         "call_start_date": base,
         "call_end_date": base + 60_000_000,
         "call_log": [
+            {"role": "system-log", "content": "Session started", "timestamp": base,
+             "metadata": {"type": "session_start", "model": "gpt-4o-mini"}},
             {"role": "assistant", "content": "Hi, I'm the agent.", "timestamp": base},
             {"role": "user", "content": "hello", "timestamp": base + 10_000_000},
             {"role": "assistant", "content": "Hello there!", "timestamp": base + 10_600_000},
             {"role": "user", "content": "look something up", "timestamp": base + 20_000_000},
             # chat system-logs nest the event type in metadata.type (voice uses "action")
-            {"role": "system-log", "content": "Session started", "timestamp": base,
-             "metadata": {"type": "session_start", "model": "gpt-4o-mini"}},
             {"role": "system-log", "content": "SWAIG function search_knowledge called",
              "timestamp": base + 21_000_000,
              "metadata": {"type": "function_call", "function": "search_knowledge",
@@ -127,6 +127,66 @@ def test_chat_payload_uses_message_metrics():
     # trace headline is the reply time; the agent-initiated opener has none
     heroes = [r["hero_ms"] for r in enrich.build_trace(payload)]
     assert heroes[0] is None and heroes[1:] == [600, 3000]
+
+
+def test_hybrid_payload_keeps_both_metric_families():
+    # One post_prompt can hold a text session that escalated to a call: it is
+    # labelled conversation_type "voice" at the top level yet contains typed
+    # turns. Mode must come from the turns, both metric families must survive,
+    # and an exchange must not span the session boundary.
+    base = 1_700_000_000_000_000
+    payload = {
+        "call_id": "hybrid-0001",
+        "conversation_type": "voice",          # hybrids are labelled voice
+        "SWMLVars": {"record_first_frame": base + 30_000_000},
+        "call_start_date": base,
+        "call_end_date": base + 60_000_000,
+        "call_log": [
+            # --- text session ---
+            {"role": "system-log", "content": "Session started", "timestamp": base,
+             "metadata": {"type": "session_start"}},
+            {"role": "user", "content": "what is swml", "timestamp": base + 2_000_000},
+            {"role": "assistant", "content": "SWML is...", "timestamp": base + 5_000_000},
+            {"role": "system-log", "content": "Session ended", "timestamp": base + 6_000_000,
+             "metadata": {"type": "session_end"}},
+            # that session's summary sits between the two sessions - not a turn
+            {"role": "assistant", "content": "In the conversation the user asked...",
+             "timestamp": base + 6_500_000},
+            # --- voice session ---
+            {"role": "system-log", "action": "session_start", "content": "AI session started",
+             "timestamp": base + 30_000_000},
+            {"role": "user", "content": "how do I send a fax",
+             "content_type": "Detected Speech", "timestamp": base + 40_000_000},
+            {"role": "assistant", "content": "To send a fax...",
+             "timestamp": base + 42_000_000, "audio_latency": 900,
+             "stamps_us": {"last_word_end": base + 40_000_000,
+                           "first_audio": base + 41_500_000}},
+        ],
+    }
+    assert enrich.conversation_mode(payload) == "hybrid"
+    assert enrich.turn_mix(payload) == (1, 1)
+    assert enrich.is_chat(payload) is False          # not a pure chat
+
+    idx = enrich.derive_index(payload, received_at_us=1)
+    assert idx["mode"] == "hybrid" and idx["is_chat"] == 0
+    assert idx["num_spoken_turns"] == 1 and idx["num_typed_turns"] == 1
+    # both families present: typed reply 3000 ms, spoken acoustic 1500 ms
+    assert idx["avg_reply_ms"] == pytest.approx(3000.0, abs=1)
+    assert idx["avg_acoustic_ms"] == pytest.approx(1500.0, abs=1)
+
+    # the typed question must pair with its OWN session's answer, and the
+    # between-sessions summary must not become an exchange
+    rows = enrich.build_trace(payload)
+    typed = [r for r in rows if r.get("typed") and r.get("caller")]
+    assert len(typed) == 1
+    assert typed[0]["caller"] == "what is swml"
+    assert typed[0]["reply"].startswith("SWML is")      # not the call's opener
+    assert typed[0]["hero_ms"] == 3000
+    assert not any("In the conversation" in (r.get("reply") or "") for r in rows)
+
+    # per-turn input mode is on the transcript so a hybrid can label each turn
+    modes = [t.get("mode") for t in enrich.build_transcript(payload) if t["kind"] == "user"]
+    assert modes == ["typed", "spoken"]
 
 
 def test_voice_payload_is_not_chat(payload):

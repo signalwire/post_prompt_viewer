@@ -39,6 +39,9 @@ CREATE TABLE IF NOT EXISTS calls (
     avg_acoustic_ex_tool_ms REAL,
     avg_reply_ms         REAL,
     is_chat              INTEGER,
+    mode                 TEXT,
+    num_spoken_turns     INTEGER,
+    num_typed_turns      INTEGER,
     total_minutes        REAL,
     total_input_tokens   INTEGER,
     total_output_tokens  INTEGER,
@@ -85,6 +88,7 @@ _INDEX_COLS = (
     "num_assistant_turns, num_functions, avg_latency_ms, avg_acoustic_ms, "
     "avg_tool_ms, avg_acoustic_ex_tool_ms, "
     "avg_reply_ms, is_chat, "
+    "mode, num_spoken_turns, num_typed_turns, "
     "total_minutes, "
     "total_input_tokens, total_output_tokens, has_recording, recording_url, "
     "has_errors, has_barge, received_at"
@@ -131,11 +135,17 @@ def init_db() -> None:
             conn.execute("ALTER TABLE calls ADD COLUMN avg_reply_ms REAL")
         if "is_chat" not in cols:
             conn.execute("ALTER TABLE calls ADD COLUMN is_chat INTEGER")
+        if "mode" not in cols:
+            conn.execute("ALTER TABLE calls ADD COLUMN mode TEXT")
+        if "num_spoken_turns" not in cols:
+            conn.execute("ALTER TABLE calls ADD COLUMN num_spoken_turns INTEGER")
+        if "num_typed_turns" not in cols:
+            conn.execute("ALTER TABLE calls ADD COLUMN num_typed_turns INTEGER")
 
         # Schema version, used to trigger one-shot re-derivations when the
         # meaning of an existing column changes.
         version = conn.execute("PRAGMA user_version").fetchone()[0]
-        if version < 7:
+        if version < 8:
             # v2: avg_latency_ms was previously audio_latency (model+TTS
             # slice, ASR-final → first_audio). It is now eos_to_push_latency
             # (endpoint detection — user stopped → we detected it), matching
@@ -167,8 +177,12 @@ def init_db() -> None:
             # v7: text-chat transcripts are detected (is_chat) and get a
             # message-to-message avg_reply_ms instead of the acoustic
             # mouth-to-ear, which does not exist for them.
+            # v8: mode (voice / chat / hybrid) is decided by the user turns
+            # themselves, because one payload can hold both a text session and
+            # a call. Both metric families are now computed independently so a
+            # hybrid reports reply time AND mouth-to-ear.
             # All bumps re-derive from the payload; run once for any row
-            # still below v7.
+            # still below v8.
             for row in conn.execute("SELECT call_id, payload FROM calls").fetchall():
                 try:
                     payload = json.loads(row["payload"])
@@ -178,13 +192,15 @@ def init_db() -> None:
                 conn.execute(
                     "UPDATE calls SET avg_latency_ms = ?, avg_acoustic_ms = ?, "
                     "avg_tool_ms = ?, avg_acoustic_ex_tool_ms = ?, "
-                    "avg_reply_ms = ?, is_chat = ? WHERE call_id = ?",
+                    "avg_reply_ms = ?, is_chat = ?, mode = ?, "
+                    "num_spoken_turns = ?, num_typed_turns = ? WHERE call_id = ?",
                     (idx.get("avg_latency_ms"), idx.get("avg_acoustic_ms"),
                      idx.get("avg_tool_ms"), idx.get("avg_acoustic_ex_tool_ms"),
-                     idx.get("avg_reply_ms"), idx.get("is_chat"),
+                     idx.get("avg_reply_ms"), idx.get("is_chat"), idx.get("mode"),
+                     idx.get("num_spoken_turns"), idx.get("num_typed_turns"),
                      row["call_id"]),
                 )
-            conn.execute("PRAGMA user_version = 7")
+            conn.execute("PRAGMA user_version = 8")
 
 
 # --------------------------------------------------------------------------- #

@@ -46,6 +46,7 @@
         {%- elif t.kind == 'assistant-thinking' -%}thinking
         {%- else -%}{{ t.role }}{%- endif -%}
       </span>
+      {%- if t.mode and rec.mode == 'hybrid' %}<span class="turn-mode {{ t.mode }}" title="this turn arrived as {{ t.mode }} input">{{ 'spoken' if t.mode == 'spoken' else 'typed' }}</span>{% endif -%}
       {% if t.ts_str %}<span class="time">{{ t.ts_str }}{% if t.elapsed %} · +{{ t.elapsed }}{% endif %}</span>{% endif %}
     </div>
     {% if t.kind == 'tool-call' %}
@@ -97,8 +98,9 @@
 <div class="detail-head">
   <a class="back" href="{{ url_for('index') }}">← all conversations</a>
   <div class="detail-title">
-    <h1>{{ rec.caller_name or rec.caller_number or ('Chat' if rec.is_chat else 'Conversation') }}</h1>
-    {% if rec.is_chat %}<span class="badge chat" title="text chat, not a voice call — no audio, so no acoustic latency or recording">CHAT</span>{% endif %}
+    <h1>{{ rec.caller_name or rec.caller_number or {'chat':'Chat','hybrid':'Chat → Call'}.get(rec.mode, 'Conversation') }}</h1>
+    {% if rec.mode == 'chat' %}<span class="badge chat" title="text chat, not a voice call — no audio, so no acoustic latency or recording">CHAT</span>
+    {% elif rec.mode == 'hybrid' %}<span class="badge hybrid" title="one session holding both typed and spoken turns — a text chat that moved to a call. Text turns are measured message-to-message, spoken turns acoustically.">HYBRID</span>{% endif %}
     {% if rec.has_recording %}<span class="badge rec">REC</span>{% endif %}
     {% if rec.has_errors %}<span class="badge warn">ERR</span>{% endif %}
     {% if rec.has_barge %}<span class="badge barge">BARGE</span>{% endif %}
@@ -107,23 +109,36 @@
 </div>
 
 <div class="kpis">
+  {# KPIs are driven by what the payload actually contains, not by a single
+     mode flag: one post_prompt can hold a text session AND a call (mode
+     "hybrid"), so each metric appears when its own data exists and is simply
+     absent otherwise -- never rendered blank, which reads as missing data. #}
+  {% set spoken = rec.num_spoken_turns or 0 %}
+  {% set typed = rec.num_typed_turns or 0 %}
   <div class="kpi"><div class="label">Duration</div><div class="value">{{ rec.duration_s | fmt_dur }}</div></div>
-  {% if rec.is_chat %}
-  {# Chat has no audio: acoustic latency, endpoint detection and TTS/ASR
-     metrics do not exist. The equivalent responsiveness number is
-     message-to-message, so we show that instead of empty voice KPIs. #}
-  <div class="kpi" title="{{ rec.num_turns }} messages: {{ rec.num_user_turns }} from the user, {{ rec.num_assistant_turns }} from the agent"><div class="label">Messages</div><div class="value">{{ rec.num_turns }}<br><small>{{ rec.num_user_turns }} user · {{ rec.num_assistant_turns }} AI</small></div></div>
-  <div class="kpi hl" title="user message → agent's next message (averaged). The chat equivalent of mouth-to-ear; there is no audio to measure."><div class="label">Reply time</div><div class="value">{{ rec.avg_reply_ms | fmt_ms }}</div></div>
-  {% if rec.avg_tool_ms and rec.avg_tool_ms > 0 %}
-  <div class="kpi" title="average SWAIG function_call time attributed to each user message (ran between the message and the reply)"><div class="label">Tool time</div><div class="value">{{ rec.avg_tool_ms | fmt_ms }}</div></div>
-  {% endif %}
-  {% else %}
-  <div class="kpi" title="{{ rec.num_turns }} total turns: {{ rec.num_user_turns }} from the caller, {{ rec.num_assistant_turns }} from the agent"><div class="label">Turns</div><div class="value">{{ rec.num_turns }}<br><small>{{ rec.num_user_turns }} caller · {{ rec.num_assistant_turns }} AI</small></div></div>
+  <div class="kpi" title="{{ rec.num_turns }} turns: {{ rec.num_user_turns }} from the user ({{ spoken }} spoken, {{ typed }} typed), {{ rec.num_assistant_turns }} from the agent">
+    <div class="label">{{ 'Messages' if not spoken else 'Turns' }}</div>
+    <div class="value">{{ rec.num_turns }}<br><small>
+      {%- if spoken and typed %}{{ spoken }} spoken · {{ typed }} typed
+      {%- elif typed %}{{ rec.num_user_turns }} user · {{ rec.num_assistant_turns }} AI
+      {%- else %}{{ rec.num_user_turns }} caller · {{ rec.num_assistant_turns }} AI{% endif -%}
+    </small></div></div>
+  {% if rec.avg_acoustic_ms %}
   <div class="kpi hl" title="user spoke → AI responded: last-word-end → first agent audio (acoustic_latency)"><div class="label">Mouth&#8209;to&#8209;ear</div><div class="value">{{ rec.avg_acoustic_ms | fmt_ms }}</div></div>
-  {% if rec.avg_tool_ms and rec.avg_tool_ms > 0 %}
-  <div class="kpi" title="mouth-to-ear minus SWAIG/tool wait: agent's own latency (model + TTS + endpoint + queue), excluding time the caller spent waiting on function calls"><div class="label">Ex&#8209;tool m2e</div><div class="value">{{ rec.avg_acoustic_ex_tool_ms | fmt_ms }}</div></div>
-  <div class="kpi" title="average SWAIG function_call time attributed to each user turn (function ran during the H→AI silence window)"><div class="label">Tool time</div><div class="value">{{ rec.avg_tool_ms | fmt_ms }}</div></div>
+  {% elif spoken and latency.stats.audio_latency and latency.stats.audio_latency.avg %}
+  {# Spoken turns but no caller anchor (ANCHOR_ABSENT — see
+     docs/TELEMETRY_TIMELINE.md §1c). Mouth-to-ear is genuinely unknowable, so
+     report the agent-side slice we do have rather than a blank. #}
+  <div class="kpi hl" title="request dispatched → first agent audio (audio_latency). Mouth-to-ear is unavailable on this call: the caller turns carry no last_word_end anchor, and a missing number beats a fabricated one."><div class="label">Agent latency</div><div class="value">{{ latency.stats.audio_latency.avg | fmt_ms }}<br><small>no caller anchor</small></div></div>
   {% endif %}
+  {% if rec.avg_reply_ms %}
+  <div class="kpi{{ ' hl' if not rec.avg_acoustic_ms }}" title="user message → agent's next message, over the typed turns. The text equivalent of mouth-to-ear; there is no audio to measure."><div class="label">Reply time</div><div class="value">{{ rec.avg_reply_ms | fmt_ms }}{% if spoken %}<br><small>typed turns</small>{% endif %}</div></div>
+  {% endif %}
+  {% if rec.avg_tool_ms and rec.avg_tool_ms > 0 %}
+  {% if rec.avg_acoustic_ms %}<div class="kpi" title="mouth-to-ear minus SWAIG/tool wait: agent's own latency (model + TTS + endpoint + queue), excluding time the caller spent waiting on function calls"><div class="label">Ex&#8209;tool m2e</div><div class="value">{{ rec.avg_acoustic_ex_tool_ms | fmt_ms }}</div></div>{% endif %}
+  <div class="kpi" title="average SWAIG function_call time attributed to each user turn (ran between the turn and the reply)"><div class="label">Tool time</div><div class="value">{{ rec.avg_tool_ms | fmt_ms }}</div></div>
+  {% endif %}
+  {% if rec.avg_latency_ms %}
   <div class="kpi" title="user stopped speaking → we detected it: last-word-end → ASR final pushed (eos_to_push_latency)"><div class="label">Turn latency</div><div class="value">{{ rec.avg_latency_ms | fmt_ms }}</div></div>
   {% endif %}
   <div class="kpi"><div class="label">Tokens</div><div class="value tok"><span>{{ totals.input_tokens | fmt_num }} <small>in</small></span><span>{{ totals.output_tokens | fmt_num }} <small>out</small></span></div></div>
@@ -243,7 +258,7 @@
     {% if trace %}
     {% if turn_stats %}
     <div class="stat-grid" style="margin-bottom:12px">
-      <div class="stat hl"><div class="label">Avg turn latency</div><div class="value">{{ turn_stats.avg | fmt_ms }}</div></div>
+      <div class="stat hl"><div class="label">Avg {{ 'reply time' if rec.mode == 'chat' else 'turn latency' }}</div><div class="value">{{ turn_stats.avg | fmt_ms }}</div></div>
       <div class="stat"><div class="label">Median</div><div class="value">{{ turn_stats.median | fmt_ms }}</div></div>
       <div class="stat"><div class="label">p95</div><div class="value">{{ turn_stats.p95 | fmt_ms }}</div></div>
       <div class="stat"><div class="label">Slowest turn</div><div class="value">{{ turn_stats.max | fmt_ms }}</div></div>
@@ -261,7 +276,7 @@
             {% if r.caller_meta and r.caller_meta.entity %}<span class="chip entity ok">{{ r.caller_meta.entity.type }} <b>{{ r.caller_meta.entity.value }}</b></span>{% endif %}
             {% if r.caller_meta and r.caller_meta.confidence is not none %}<span class="chip">conf <b>{{ '%.0f' | format(r.caller_meta.confidence) }}%</b></span>{% endif %}
           </div>
-          {% if r.hero_ms is not none %}<div class="tr-hero">{{ r.hero_ms }}<span class="u">ms</span>{% if r.speed == 'fast' %} <span class="tr-zap">&#9889;</span>{% endif %}<small>{{ ('reply time' if rec.is_chat else 'mouth-to-ear') if r.anchored else ('to first message' if rec.is_chat else 'to first audio') }}</small></div>{% endif %}
+          {% if r.hero_ms is not none %}<div class="tr-hero">{{ r.hero_ms }}<span class="u">ms</span>{% if r.speed == 'fast' %} <span class="tr-zap">&#9889;</span>{% endif %}<small>{{ ('reply time' if r.typed else 'mouth-to-ear') if r.anchored else ('to first message' if r.typed else 'to first audio') }}</small></div>{% endif %}
         </div>
 
         {% if r.verdict %}<div class="tr-verdict vk-{{ r.verdict_kind }}">{{ vicon.get(r.verdict_kind, '·') }} {{ r.verdict }}</div>{% endif %}
