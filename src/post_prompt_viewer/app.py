@@ -32,8 +32,8 @@ def create_app() -> FastAPI:
             try:
                 from . import recordings
 
-                for call_id in storage.pending_recordings():
-                    recordings.schedule_analysis(call_id)
+                for call_id, leg in storage.pending_recordings():
+                    recordings.schedule_analysis(call_id, leg)
             except Exception:
                 log.info("recordings extra not installed; skipping analysis catch-up")
         yield

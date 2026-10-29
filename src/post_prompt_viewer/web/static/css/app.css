@@ -156,6 +156,19 @@ code, pre, .mono { font-family: var(--font-code); }
 .badge.chat { color: var(--sw-purple); border-color: rgba(96, 27, 230, 0.45); }
 .badge.hybrid { color: var(--sw-turquoise); border-color: rgba(64, 224, 208, 0.45); }
 
+/* Voice-section switcher (a conversation can record several sections) */
+.leg-switch { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; }
+.leg-switch .eyebrow { margin-right: 4px; }
+.leg-switch .leg { display: inline-flex; flex-direction: column; gap: 1px; padding: 5px 12px;
+  border: 1px solid var(--border-strong); border-radius: var(--radius-md);
+  font-family: var(--font-code); font-size: 12.5px; color: var(--fg-secondary);
+  background: var(--bg-surface); transition: border-color .15s, color .15s; }
+.leg-switch .leg small { font-size: 10.5px; color: var(--fg-subtle); }
+.leg-switch .leg:hover { border-color: var(--sw-fuchsia); color: var(--fg-default); }
+.leg-switch .leg.on { border-color: var(--sw-fuchsia); color: var(--sw-fuchsia);
+  box-shadow: var(--glow-fuchsia); }
+.leg-switch .leg.on small { color: var(--sw-fuchsia); }
+
 /* per-turn input mode, shown only on a hybrid transcript */
 .turn-mode { font-family: var(--font-code); font-size: 10px; text-transform: uppercase;
   letter-spacing: 0.08em; padding: 1px 5px; border-radius: var(--radius-sm);

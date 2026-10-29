@@ -153,7 +153,7 @@
   <button class="player-btn ghost" id="next-turn" title="Next turn" aria-label="Next turn">&#9199;</button>
   <span class="player-time" id="player-time">0:00</span>
   <span class="player-now" id="player-now">Click any turn to hear it</span>
-  <audio id="ppv-audio" preload="metadata" src="{{ url_for('recording_audio', call_id=rec.call_id) }}"></audio>
+  <audio id="ppv-audio" preload="metadata" src="{{ url_for('recording_audio', call_id=rec.call_id, leg=sel_leg) }}"></audio>
   <script id="seek-index" type="application/json">{{ seek_index | tojson }}</script>
 </div>
 {% endif %}
@@ -169,7 +169,7 @@
 {# ===================== OVERVIEW ===================== #}
 <section class="tab-panel active" id="panel-overview" role="tabpanel">
   {% if rec.has_recording %}
-  <div class="card" data-status-url="{{ url_for('recording_status', call_id=rec.call_id) }}" data-rec-initial="{{ recording.status }}">
+  <div class="card" data-status-url="{{ url_for('recording_status', call_id=rec.call_id, leg=sel_leg) }}" data-rec-initial="{{ recording.status }}">
     <div class="page-head" style="margin:0 0 8px">
       <h3 style="margin:0">Recording</h3>
       <span class="status-pill {{ recording.status }}" data-rec-status><span class="dot"></span>{{ recording.status }}</span>
@@ -178,14 +178,14 @@
       <p class="note">Use the player at the top of the page to listen (or click any turn). The waveform and recording-measured latency are on the <a href="#latency">Latency</a> tab.</p>
     {% elif recording.status == 'done' %}
       <p class="note">The cached audio was cleared.</p>
-      <button class="btn" data-analyze-url="{{ url_for('trigger_analysis', call_id=rec.call_id) }}">Re-fetch &amp; analyze</button>
+      <button class="btn" data-analyze-url="{{ url_for('trigger_analysis', call_id=rec.call_id, leg=sel_leg) }}">Re-fetch &amp; analyze</button>
     {% elif recording.status in ['pending', 'downloading', 'analyzing'] %}
       <p class="note">Analyzing the recording. This page updates automatically when it finishes.</p>
     {% elif recording.status == 'failed' %}
       <p class="note">Analysis failed: {{ recording.error }}</p>
-      <button class="btn secondary" data-analyze-url="{{ url_for('trigger_analysis', call_id=rec.call_id) }}">Retry analysis</button>
+      <button class="btn secondary" data-analyze-url="{{ url_for('trigger_analysis', call_id=rec.call_id, leg=sel_leg) }}">Retry analysis</button>
     {% else %}
-      <button class="btn" data-analyze-url="{{ url_for('trigger_analysis', call_id=rec.call_id) }}">Analyze recording</button>
+      <button class="btn" data-analyze-url="{{ url_for('trigger_analysis', call_id=rec.call_id, leg=sel_leg) }}">Analyze recording</button>
     {% endif %}
   </div>
   {% endif %}
@@ -375,12 +375,29 @@
 {# ===================== RECORDING (waveform + measured latency) ===================== #}
 {% if rec.has_recording %}
 <section class="tab-panel" id="panel-recording" role="tabpanel"
-         data-status-url="{{ url_for('recording_status', call_id=rec.call_id) }}" data-rec-initial="{{ recording.status }}">
+         data-status-url="{{ url_for('recording_status', call_id=rec.call_id, leg=sel_leg) }}" data-rec-initial="{{ recording.status }}">
+  {% if sections | length > 1 %}
+  {# A conversation that toggled voice off and on records a separate file per
+     voice section. Each is shown on its own, anchored on its own
+     record_first_frame and cross-checked against only its own turns -- legs
+     have gaps because chat sections are skipped (1, 3 = section 2 was chat). #}
+  <div class="leg-switch" role="tablist" aria-label="Voice sections">
+    <span class="eyebrow">Voice sections</span>
+    {% for sec in sections %}
+    <a class="leg{{ ' on' if sec.selected }}" role="tab" aria-selected="{{ 'true' if sec.selected else 'false' }}"
+       href="{{ url_for('detail', call_id=rec.call_id) }}?leg={{ sec.leg }}#recording"
+       title="section {{ sec.leg }} of the conversation &middot; {{ sec.status }}{% if sec.record_call_result %} &middot; {{ sec.record_call_result }}{% endif %}">
+      Leg {{ sec.leg }}
+      <small>{% if sec.duration_s %}{{ sec.duration_s | fmt_dur }}{% else %}{{ sec.status }}{% endif %}</small>
+    </a>
+    {% endfor %}
+  </div>
+  {% endif %}
   {% if recording.status != 'done' or not analysis %}
   <div class="card">
     <p class="note">Recording-measured latency appears here once analysis finishes
       (<span data-rec-status class="status-pill {{ recording.status }}"><span class="dot"></span>{{ recording.status }}</span>).</p>
-    {% if recording.status in ['failed', 'absent'] %}<button class="btn" data-analyze-url="{{ url_for('trigger_analysis', call_id=rec.call_id) }}">Analyze recording</button>{% endif %}
+    {% if recording.status in ['failed', 'absent'] %}<button class="btn" data-analyze-url="{{ url_for('trigger_analysis', call_id=rec.call_id, leg=sel_leg) }}">Analyze recording</button>{% endif %}
   </div>
   {% else %}
   <div class="card">
@@ -502,6 +519,37 @@
     <details class="code-collapse" style="margin-top:8px"><summary>SWMLVars &middot; {{ call_facts.swml_vars | length }} keys</summary><pre class="code">{{ call_facts.swml_vars | pretty }}</pre></details>
     <details class="code-collapse" style="margin-top:8px"><summary>SWMLCall &middot; {{ call_facts.swml_call | length }} keys</summary><pre class="code">{{ call_facts.swml_call | pretty }}</pre></details>
   </div>
+  {% if sections %}
+  <div class="card">
+    <h3>Recordings</h3>
+    <p class="note" style="margin:6px 0 12px">{{ sections | length }} recorded voice section{{ '' if sections | length == 1 else 's' }}.
+      {%- if sections | length > 1 %} Leg numbers are positions in the conversation, so gaps mean chat sections in between.{% endif %}</p>
+    <div class="table-wrap">
+      <table class="calls">
+        <thead><tr><th>Leg</th><th>Status</th><th>Duration</th><th>Started</th><th>Result</th><th>Control ID</th><th>File</th></tr></thead>
+        <tbody>
+        {% for sec in sections %}
+          <tr{{ ' class=selected' | safe if sec.selected }}>
+            <td>{{ sec.leg }}</td>
+            <td><span class="status-pill {{ sec.status }}"><span class="dot"></span>{{ sec.status }}</span></td>
+            <td>{{ sec.duration_s | fmt_dur or '—' }}</td>
+            <td>{{ sec.record_first_frame | fmt_dt('%H:%M:%S UTC') or (sec.record_call_start | fmt_dt('%H:%M:%S UTC')) or '—' }}</td>
+            <td>{{ sec.record_call_result or '—' }}</td>
+            <td><span class="mono">{{ sec.record_control_id or '—' }}</span></td>
+            <td>
+              {% if sec.record_call_url %}<a class="fact-url" href="{{ sec.record_call_url }}" target="_blank" rel="noopener">source</a>
+              <button type="button" class="btn secondary copy-btn" style="margin-left:6px;padding:2px 8px;font-size:12px" data-copy="{{ sec.record_call_url }}" title="Copy this section's recording URL">copy</button>
+              {% else %}—{% endif %}
+              {% if sec.has_audio %}<a class="fact-url" style="margin-left:6px" href="{{ url_for('recording_audio', call_id=rec.call_id, leg=sec.leg) }}" target="_blank" rel="noopener">cached</a>{% endif %}
+            </td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+  {% endif %}
+
   <div class="card">
     <span class="eyebrow">Raw payload</span>
     <p class="note" style="margin:8px 0 14px">{{ payload | length }} top-level keys. The full JSON is large, so it isn't rendered inline &mdash; open, download, or copy the link.</p>

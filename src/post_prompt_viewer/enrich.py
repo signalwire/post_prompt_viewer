@@ -123,25 +123,124 @@ def fmt_duration(seconds: Optional[float]) -> str:
     return f"{int(minutes)}m {secs:.1f}s"
 
 
-def _record_start(payload: dict):
-    """Recording t=0 as a float (micros), tolerating the stringified form.
+# Fields a section carries in its own right; anything else the platform sets on
+# a section object is passed through verbatim (the producer reserves the right
+# to add record_* keys).
+_SECTION_FIELDS = ("record_call_url", "record_control_id", "record_call_start",
+                   "record_call_result", "record_first_frame")
 
-    Prefer ``record_first_frame`` — the wall-clock µs of the first PCM frame
-    actually written to the recording file, on the same clock as every
-    ``stamps_us``. Fall back to ``record_call_start`` (the relay-ack, which fires
-    ~100 ms *before* the first frame) only when the newer field is absent, e.g.
-    older calls or a call with no recording. Anchoring on the relay-ack shifts the
-    whole recording timeline ~100 ms early and shows up as phantom "first_audio is
-    late"; ``record_first_frame`` removes it without touching any stamp.
+
+def sections(payload: dict) -> list:
+    """Every recorded voice section, chronological, normalised.
+
+    A conversation can toggle between voice and chat (voice -> chat -> voice).
+    Each voice section records to its own file; chat sections produce none.
+    ``SWMLVars.section_recordings`` lists one object per voice section with its
+    own anchors, and ``leg`` is that section's 1-based position in the
+    conversation -- so the numbers have gaps ([1, 3] means section 2 was chat).
+
+    When ``section_recordings`` is absent the conversation was a single voice
+    section and the scalar ``SWMLVars.record_call_url`` describes it; that is
+    normalised to one section so every consumer sees the same shape. A
+    chat-only conversation has neither and yields [].
     """
     sv = payload.get("SWMLVars") or {}
-    rs = sv.get("record_first_frame")
+    raw = sv.get("section_recordings")
+    out = []
+    if isinstance(raw, list) and raw:
+        for i, sec in enumerate(raw):
+            if not isinstance(sec, dict):
+                continue
+            leg = sec.get("leg")
+            leg = int(leg) if isinstance(leg, (int, float)) else i + 1
+            item = {"leg": leg}
+            for k in _SECTION_FIELDS:
+                item[k] = sec.get(k)
+            # pass through any additional record_* fields verbatim
+            item["extra"] = {k: v for k, v in sec.items()
+                             if k not in _SECTION_FIELDS and k != "leg"}
+            out.append(item)
+        out.sort(key=lambda x: x["leg"])
+    elif sv.get("record_call_url") or sv.get("record_first_frame") or sv.get("record_call_start"):
+        # The anchor can exist without a fetchable URL (and vice versa), so the
+        # single-section fallback triggers on any of them; has_recording still
+        # keys off the URL, since that is what decides there is a file to get.
+        item = {"leg": 1}
+        for k in _SECTION_FIELDS:
+            item[k] = sv.get(k)
+        item["extra"] = {}
+        out.append(item)
+    # anchor each section once (see _section_anchor for the field preference)
+    for sec in out:
+        sec["anchor_us"] = _section_anchor(sec)
+    return out
+
+
+def _section_anchor(sec: dict):
+    """A section's recording t=0, in micros.
+
+    Prefer ``record_first_frame`` -- the wall-clock µs of the first PCM frame
+    actually written to the file, on the same clock as every ``stamps_us``.
+    Fall back to ``record_call_start`` (the relay-ack, which fires ~100 ms
+    *before* the first frame) only when the newer field is absent. Anchoring on
+    the relay-ack shifts the whole recording timeline ~100 ms early and shows up
+    as a phantom "first_audio is late".
+    """
+    rs = sec.get("record_first_frame")
     if rs is None:
-        rs = sv.get("record_call_start")
-    try:
-        return float(rs) if rs else None
-    except (TypeError, ValueError):
+        rs = sec.get("record_call_start")
+    return as_us(rs)
+
+
+def primary_leg(payload: dict):
+    """The leg the scalar ``record_call_url`` refers to: the LAST voice section
+    (the spec guarantees the scalar is the final section's recording)."""
+    secs = sections(payload)
+    return secs[-1]["leg"] if secs else None
+
+
+def section_by_leg(payload: dict, leg=None) -> Optional[dict]:
+    """One section by leg number; the primary (last) section when leg is None."""
+    secs = sections(payload)
+    if not secs:
         return None
+    if leg is None:
+        return secs[-1]
+    for sec in secs:
+        if sec["leg"] == int(leg):
+            return sec
+    return None
+
+
+def section_for_ts(payload: dict, ts) -> Optional[dict]:
+    """The section whose recording covers a wall-clock stamp.
+
+    The last section that had started by then. A turn that predates every
+    section (a chat prefix) belongs to none, and returns None rather than being
+    attributed to a recording that had not begun.
+    """
+    ts = as_us(ts)
+    if not ts:
+        return None
+    found = None
+    for sec in sections(payload):
+        a = sec.get("anchor_us")
+        if a and a <= ts:
+            found = sec
+        elif a and a > ts:
+            break
+    return found
+
+
+def _record_start(payload: dict, leg=None):
+    """Recording t=0 (micros) for one section; the primary section by default.
+
+    Kept as the single chokepoint every alignment flows through -- passing a leg
+    is what keeps a multi-section conversation from aligning one section's turns
+    against another section's audio.
+    """
+    sec = section_by_leg(payload, leg)
+    return sec.get("anchor_us") if sec else None
 
 
 def _seek(entry: dict, record_start) -> Optional[float]:
@@ -307,6 +406,7 @@ def derive_index(payload: dict, received_at_us: int) -> dict:
 
     mode = conversation_mode(payload)
     spoken_n, typed_n = turn_mix(payload)
+    _secs = sections(payload)
     user_turns = [e for e in call_log if e.get("role") == "user" and e.get("content")]
     asst_turns = [
         e for e in call_log if e.get("role") in {"assistant", "assistant-manual"} and e.get("content")
@@ -479,8 +579,13 @@ def derive_index(payload: dict, received_at_us: int) -> dict:
         "total_minutes": payload.get("total_minutes"),
         "total_input_tokens": payload.get("total_input_tokens"),
         "total_output_tokens": payload.get("total_output_tokens"),
-        "has_recording": bool(payload.get("SWMLVars", {}).get("record_call_url")),
-        "recording_url": payload.get("SWMLVars", {}).get("record_call_url") or "",
+        # has_recording means "there is at least one file to fetch"; the scalar
+        # recording_url stays the primary (last) section, as the spec defines
+        # it, and num_recordings says how many sections there are to fetch.
+        "has_recording": 1 if any(x.get("record_call_url") for x in _secs) else 0,
+        "recording_url": (payload.get("SWMLVars", {}).get("record_call_url")
+                          or (_secs[-1].get("record_call_url") if _secs else "") or ""),
+        "num_recordings": sum(1 for x in _secs if x.get("record_call_url")),
         "has_errors": _has_errors(call_log),
         "has_barge": any(e.get("barged") for e in call_log),
         "received_at": received_at_us,
@@ -524,7 +629,7 @@ def build_transcript(payload: dict, source: str = "blessed") -> list:
     """
     log_key = "raw_call_log" if source == "raw" else "call_log"
     entries = payload.get(log_key) or payload.get("call_log") or []
-    record_start = _record_start(payload)
+    secs = sections(payload)
     barge_idx = _barge_index(payload)
 
     turns = []
@@ -561,7 +666,11 @@ def build_transcript(payload: dict, source: str = "blessed") -> list:
 
         turn = {
             "idx": idx,
-            "seek": _seek(e, record_start),
+            # Seek is relative to the section that was recording at the time:
+            # with voice -> chat -> voice each section is its own file, so a
+            # position only means something together with its leg.
+            "leg": None,
+            "seek": None,
             "role": role,
             "kind": role,
             "speaker": "system",
@@ -572,6 +681,23 @@ def build_transcript(payload: dict, source: str = "blessed") -> list:
             "collapsible": False,
             "meta": {},
         }
+
+        # Attribute the turn to the section that was recording at the time, and
+        # make its seek relative to THAT section's file. Only entries that
+        # belong to a voice section get one: a typed turn sitting in a chat gap
+        # between two voice sections would otherwise be handed a position
+        # inside the preceding section's audio.
+        if secs and not (role == "user" and turn_mode(e) == "typed"):
+            if len(secs) == 1:
+                # One voice section: every turn is positioned in that single
+                # file, exactly as before section_recordings existed.
+                turn["leg"] = secs[0]["leg"]
+                turn["seek"] = _seek(e, secs[0].get("anchor_us"))
+            else:
+                _sec = section_for_ts(payload, e.get("start_timestamp") or ts)
+                if _sec:
+                    turn["leg"] = _sec["leg"]
+                    turn["seek"] = _seek(e, _sec.get("anchor_us"))
 
         if role in {"assistant", "assistant-manual"} and content:
             turn["speaker"] = "ai"
@@ -756,7 +882,7 @@ def latency_series(payload: dict) -> dict:
     }
 
 
-def align_latency(payload: dict, analysis: dict) -> dict:
+def align_latency(payload: dict, analysis: dict, leg=None) -> dict:
     """Cross-check server-reported latency against recording-measured latency.
 
     latency_checker reports Human->AI response latencies in *seconds*, measured
@@ -772,7 +898,18 @@ def align_latency(payload: dict, analysis: dict) -> dict:
     server = latency_series(payload)
     spoints = server["points"]
     wav = analysis.get("latencies") or []
-    record_start = _record_start(payload)
+    # One section's audio may only be compared against that section's turns: a
+    # voice -> chat -> voice conversation has a separate file per section, each
+    # with its own t=0.
+    sec = section_by_leg(payload, leg)
+    record_start = sec.get("anchor_us") if sec else None
+    if sec is not None:
+        nxt = next((x for x in sections(payload) if x["leg"] > sec["leg"]), None)
+        lo, hi = sec.get("anchor_us"), (nxt or {}).get("anchor_us")
+        if lo:
+            spoints = [p for p in spoints
+                       if (lambda t: t is not None and t >= lo and (hi is None or t < hi))(
+                           as_us(p.get("start_ts") or p.get("ts")))]
 
     pairs = []
     used = set()
@@ -1191,12 +1328,12 @@ def build_trace(payload: dict) -> list:
 _WAVE_MS_LABELS = {"turn_decided": "EOT", "first_token": "token", "first_audio": "audio"}
 
 
-def wave_markers(payload: dict) -> list:
+def wave_markers(payload: dict, leg=None) -> list:
     """Recording-relative markers for the waveform overlay: SWAIG tool spans and
     the key per-turn pipeline stamps, so the milestones scroll with the audio.
     ``t`` / ``dur`` are seconds from the start of the recording.
     """
-    rs = _record_start(payload)
+    rs = _record_start(payload, leg)
     if not rs:
         return []
     out = []

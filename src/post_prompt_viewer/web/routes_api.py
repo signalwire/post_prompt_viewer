@@ -7,6 +7,7 @@ plus the cached playback audio. Page rendering lives in ``routes_view``.
 from __future__ import annotations
 
 import mimetypes
+from typing import Optional
 from pathlib import Path
 
 from fastapi import APIRouter, Body, HTTPException
@@ -33,13 +34,10 @@ async def call_payload(call_id: str):
     return rec["payload"]
 
 
-@router.get("/recording/{call_id}")
-async def recording_status(call_id: str):
-    rec = storage.get_recording(call_id)
-    if rec is None:
-        raise HTTPException(status_code=404, detail="unknown call")
+def _rec_payload(call_id: str, rec: dict) -> dict:
     return {
         "call_id": call_id,
+        "leg": rec.get("leg", 1),
         "status": rec["status"],
         "error": rec.get("error"),
         "duration_s": rec.get("duration_s"),
@@ -48,10 +46,29 @@ async def recording_status(call_id: str):
     }
 
 
+@router.get("/recording/{call_id}")
+async def recording_status(call_id: str, leg: Optional[int] = None):
+    """One section's status, or the primary section's when no leg is given.
+
+    ``sections`` lists every voice section so a poller can see the whole
+    conversation in one request (voice -> chat -> voice records per section).
+    """
+    rec = storage.get_recording(call_id, leg)
+    if rec is None:
+        raise HTTPException(status_code=404, detail="unknown call")
+    out = _rec_payload(call_id, rec)
+    out["sections"] = [
+        {k: v for k, v in _rec_payload(call_id, r).items() if k != "analysis"}
+        for r in storage.get_recordings(call_id)
+    ]
+    return out
+
+
 @router.post("/recording/{call_id}/analyze")
-async def trigger_analysis(call_id: str):
-    """Manually (re)queue analysis for a call's recording."""
-    rec = storage.get_recording(call_id)
+async def trigger_analysis(call_id: str, leg: Optional[int] = None):
+    """Manually (re)queue analysis: one section, or every section when no leg
+    is given."""
+    rec = storage.get_recording(call_id, leg)
     if rec is None:
         raise HTTPException(status_code=404, detail="unknown call")
     if not rec.get("source_url"):
@@ -64,7 +81,7 @@ async def trigger_analysis(call_id: str):
             detail="recording analysis unavailable; install the [recordings] extra",
         ) from exc
     storage.set_recording(call_id, status="pending", error=None)
-    recordings.schedule_analysis(call_id)
+    recordings.schedule_analysis(call_id, leg)
     return {"call_id": call_id, "status": "pending"}
 
 
@@ -99,8 +116,8 @@ async def delete_calls(ids: list[str] = Body(..., embed=True)):
 
 
 @router.get("/recording/{call_id}/audio")
-async def recording_audio(call_id: str):
-    rec = storage.get_recording(call_id)
+async def recording_audio(call_id: str, leg: Optional[int] = None):
+    rec = storage.get_recording(call_id, leg)
     if rec is None or not rec.get("audio_path"):
         raise HTTPException(status_code=404, detail="no cached audio")
     path = Path(rec["audio_path"]).resolve()

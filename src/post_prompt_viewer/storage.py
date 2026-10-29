@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS calls (
     avg_reply_ms         REAL,
     is_chat              INTEGER,
     mode                 TEXT,
+    num_recordings       INTEGER,
     num_spoken_turns     INTEGER,
     num_typed_turns      INTEGER,
     total_minutes        REAL,
@@ -63,14 +64,20 @@ CREATE VIRTUAL TABLE IF NOT EXISTS calls_fts USING fts5(
 );
 
 CREATE TABLE IF NOT EXISTS recordings (
-    call_id     TEXT PRIMARY KEY,
+    -- One row per RECORDED VOICE SECTION. A conversation can toggle between
+    -- voice and chat (voice -> chat -> voice); each voice section records to
+    -- its own file, so the key is (call_id, leg) where leg is the section's
+    -- 1-based position in the conversation. Single-section calls are leg 1.
+    call_id     TEXT NOT NULL,
+    leg         INTEGER NOT NULL DEFAULT 1,
     status      TEXT NOT NULL,          -- absent|pending|downloading|analyzing|done|failed
     source_url  TEXT,
     audio_path  TEXT,                   -- cached playback transcode
     analysis    TEXT,                   -- latency_checker results (JSON)
     error       TEXT,
     duration_s  REAL,
-    updated_at  INTEGER
+    updated_at  INTEGER,
+    PRIMARY KEY (call_id, leg)
 );
 
 CREATE TABLE IF NOT EXISTS summaries (
@@ -89,6 +96,7 @@ _INDEX_COLS = (
     "avg_tool_ms, avg_acoustic_ex_tool_ms, "
     "avg_reply_ms, is_chat, "
     "mode, num_spoken_turns, num_typed_turns, "
+    "num_recordings, "
     "total_minutes, "
     "total_input_tokens, total_output_tokens, has_recording, recording_url, "
     "has_errors, has_barge, received_at"
@@ -137,10 +145,28 @@ def init_db() -> None:
             conn.execute("ALTER TABLE calls ADD COLUMN is_chat INTEGER")
         if "mode" not in cols:
             conn.execute("ALTER TABLE calls ADD COLUMN mode TEXT")
+        if "num_recordings" not in cols:
+            conn.execute("ALTER TABLE calls ADD COLUMN num_recordings INTEGER")
         if "num_spoken_turns" not in cols:
             conn.execute("ALTER TABLE calls ADD COLUMN num_spoken_turns INTEGER")
         if "num_typed_turns" not in cols:
             conn.execute("ALTER TABLE calls ADD COLUMN num_typed_turns INTEGER")
+
+        # recordings was keyed on call_id alone before section_recordings
+        # existed. SQLite cannot alter a primary key, so rebuild the table and
+        # carry every existing row across as leg 1 (those payloads had a single
+        # voice section by definition).
+        rcols = {r["name"] for r in conn.execute("PRAGMA table_info(recordings)")}
+        if rcols and "leg" not in rcols:
+            conn.execute("ALTER TABLE recordings RENAME TO recordings_old")
+            conn.executescript(SCHEMA)
+            conn.execute(
+                "INSERT INTO recordings (call_id, leg, status, source_url, audio_path, "
+                "analysis, error, duration_s, updated_at) "
+                "SELECT call_id, 1, status, source_url, audio_path, analysis, error, "
+                "duration_s, updated_at FROM recordings_old"
+            )
+            conn.execute("DROP TABLE recordings_old")
 
         # Schema version, used to trigger one-shot re-derivations when the
         # meaning of an existing column changes.
@@ -229,13 +255,24 @@ def save_call(payload: dict, received_at_us: Optional[int] = None) -> str:
             "INSERT INTO calls_fts (call_id, transcript) VALUES (?, ?)",
             (call_id, enrich.transcript_text(payload)),
         )
-        # Seed a recordings row without clobbering an existing analysis.
-        status = "pending" if idx["has_recording"] else "absent"
-        conn.execute(
-            "INSERT OR IGNORE INTO recordings (call_id, status, source_url, updated_at) "
-            "VALUES (?, ?, ?, ?)",
-            (call_id, status, idx["recording_url"], received_at_us),
-        )
+        # Seed one row per recorded voice section, without clobbering an
+        # existing analysis. A conversation that toggled voice off and on has a
+        # file per section; a chat-only one gets a single "absent" row so the
+        # call still has a recording record to look up.
+        secs = [x for x in enrich.sections(payload) if x.get("record_call_url")]
+        if secs:
+            for sec in secs:
+                conn.execute(
+                    "INSERT OR IGNORE INTO recordings (call_id, leg, status, source_url, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (call_id, int(sec["leg"]), "pending", sec["record_call_url"], received_at_us),
+                )
+        else:
+            conn.execute(
+                "INSERT OR IGNORE INTO recordings (call_id, leg, status, source_url, updated_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (call_id, 1, "absent", idx["recording_url"], received_at_us),
+            )
     return call_id
 
 
@@ -342,19 +379,41 @@ def count_calls() -> int:
 # Recordings
 # --------------------------------------------------------------------------- #
 
-def get_recording(call_id: str) -> Optional[dict]:
-    with _connect() as conn:
-        row = conn.execute("SELECT * FROM recordings WHERE call_id = ?", (call_id,)).fetchone()
-    if row is None:
-        return None
+def _hydrate_recording(row) -> dict:
     rec = dict(row)
     if rec.get("analysis"):
         rec["analysis"] = json.loads(rec["analysis"])
     return rec
 
 
-def set_recording(call_id: str, **fields: Any) -> None:
-    """Upsert recording fields (status/audio_path/analysis/error/duration_s)."""
+def get_recording(call_id: str, leg: Optional[int] = None) -> Optional[dict]:
+    """One section's recording row. ``leg=None`` returns the primary section --
+    the highest leg, i.e. the one the scalar ``record_call_url`` refers to."""
+    with _connect() as conn:
+        if leg is None:
+            row = conn.execute(
+                "SELECT * FROM recordings WHERE call_id = ? ORDER BY leg DESC LIMIT 1",
+                (call_id,),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT * FROM recordings WHERE call_id = ? AND leg = ?",
+                (call_id, int(leg)),
+            ).fetchone()
+    return _hydrate_recording(row) if row is not None else None
+
+
+def get_recordings(call_id: str) -> list:
+    """Every section's recording row for a call, in leg order."""
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM recordings WHERE call_id = ? ORDER BY leg", (call_id,)
+        ).fetchall()
+    return [_hydrate_recording(r) for r in rows]
+
+
+def set_recording(call_id: str, leg: int = 1, **fields: Any) -> None:
+    """Upsert one section's recording fields (status/audio_path/analysis/...)."""
     if "analysis" in fields and fields["analysis"] is not None and not isinstance(
         fields["analysis"], str
     ):
@@ -362,20 +421,21 @@ def set_recording(call_id: str, **fields: Any) -> None:
     fields["updated_at"] = now_us()
     with _connect() as conn:
         existing = conn.execute(
-            "SELECT call_id FROM recordings WHERE call_id = ?", (call_id,)
+            "SELECT call_id FROM recordings WHERE call_id = ? AND leg = ?",
+            (call_id, int(leg)),
         ).fetchone()
         if existing is None:
-            cols = ["call_id"] + list(fields.keys())
+            cols = ["call_id", "leg"] + list(fields.keys())
             conn.execute(
                 f"INSERT INTO recordings ({', '.join(cols)}) "
                 f"VALUES ({', '.join(['?'] * len(cols))})",
-                [call_id] + list(fields.values()),
+                [call_id, int(leg)] + list(fields.values()),
             )
         else:
             sets = ", ".join(f"{k} = ?" for k in fields)
             conn.execute(
-                f"UPDATE recordings SET {sets} WHERE call_id = ?",
-                list(fields.values()) + [call_id],
+                f"UPDATE recordings SET {sets} WHERE call_id = ? AND leg = ?",
+                list(fields.values()) + [call_id, int(leg)],
             )
 
 
@@ -383,9 +443,10 @@ def pending_recordings() -> list:
     """call_ids whose recordings still need analysis (for startup catch-up)."""
     with _connect() as conn:
         return [
-            r["call_id"]
+            (r["call_id"], r["leg"])
             for r in conn.execute(
-                "SELECT call_id FROM recordings WHERE status IN ('pending', 'downloading', 'analyzing')"
+                "SELECT call_id, leg FROM recordings "
+                "WHERE status IN ('pending', 'downloading', 'analyzing') ORDER BY call_id, leg"
             )
         ]
 

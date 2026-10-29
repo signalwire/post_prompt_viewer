@@ -13,6 +13,7 @@ import logging
 import mimetypes
 import os
 import re
+from typing import Optional
 import shutil
 import socket
 import warnings
@@ -37,17 +38,24 @@ _EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="ppv-analyze")
 PLAYBACK_SR = 16_000
 
 
-def schedule_analysis(call_id: str) -> None:
-    """Queue analysis for a call's recording (non-blocking)."""
-    _EXECUTOR.submit(_run, call_id)
+def schedule_analysis(call_id: str, leg: Optional[int] = None) -> None:
+    """Queue analysis for one voice section, or every pending one when ``leg``
+    is None (a conversation that toggled voice off and on has a file per
+    section, each needing its own fetch + analysis)."""
+    if leg is not None:
+        _EXECUTOR.submit(_run, call_id, int(leg))
+        return
+    legs = [r["leg"] for r in storage.get_recordings(call_id) if r.get("source_url")]
+    for lg in legs or [1]:
+        _EXECUTOR.submit(_run, call_id, lg)
 
 
-def _run(call_id: str) -> None:
+def _run(call_id: str, leg: int = 1) -> None:
     try:
-        _analyze(call_id)
+        _analyze(call_id, leg)
     except Exception as exc:  # pragma: no cover - defensive worker boundary
-        log.exception("recording analysis failed for %s", call_id)
-        storage.set_recording(call_id, status="failed", error=str(exc)[:500])
+        log.exception("recording analysis failed for %s leg %s", call_id, leg)
+        storage.set_recording(call_id, leg, status="failed", error=str(exc)[:500])
 
 
 def _ext_from_url(url: str) -> str:
@@ -136,14 +144,14 @@ def _transcode(src: Path, dest: Path, fmt: str = "mp3", sr: int = PLAYBACK_SR) -
     subprocess.run(cmd, check=True, timeout=600)
 
 
-def _analyze(call_id: str) -> None:
+def _analyze(call_id: str, leg: int = 1) -> None:
     settings = get_settings()
-    rec = storage.get_recording(call_id)
+    rec = storage.get_recording(call_id, leg)
     if rec is None:
         return
     url = rec.get("source_url")
     if not url:
-        storage.set_recording(call_id, status="absent")
+        storage.set_recording(call_id, leg, status="absent")
         return
 
     try:
@@ -151,6 +159,7 @@ def _analyze(call_id: str) -> None:
     except Exception:
         storage.set_recording(
             call_id,
+            leg,
             status="failed",
             error="recording analysis requires the [recordings] extra (latency_checker)",
         )
@@ -158,13 +167,17 @@ def _analyze(call_id: str) -> None:
 
     rec_dir = settings.recordings_dir
     sid = safe_id(call_id) or "rec"
-    original = rec_dir / f"{sid}{_ext_from_url(url)}"
+    # Leg is part of the filename: a multi-section conversation has one file per
+    # section and they must not overwrite each other. Leg 1 keeps the original
+    # bare name so existing cached files stay valid.
+    suffix = "" if int(leg) <= 1 else f".leg{int(leg)}"
+    original = rec_dir / f"{sid}{suffix}{_ext_from_url(url)}"
 
     if not original.exists() or original.stat().st_size == 0:
-        storage.set_recording(call_id, status="downloading")
+        storage.set_recording(call_id, leg, status="downloading")
         _fetch(url, original)
 
-    storage.set_recording(call_id, status="analyzing")
+    storage.set_recording(call_id, leg, status="analyzing")
     analyzer = AudioAnalyzer(
         file_path=str(original),
         energy_threshold=settings.energy_threshold,
@@ -175,7 +188,7 @@ def _analyze(call_id: str) -> None:
     results = analyzer.analyze()
 
     # Downsample to a small playback file; fall back to serving the original.
-    playback = rec_dir / f"{sid}.{PLAYBACK_SR // 1000}k.{settings.playback_format}"
+    playback = rec_dir / f"{sid}{suffix}.{PLAYBACK_SR // 1000}k.{settings.playback_format}"
     try:
         _transcode(original, playback, settings.playback_format)
         audio_path = str(playback)
@@ -193,6 +206,7 @@ def _analyze(call_id: str) -> None:
     duration = (results.get("file_info") or {}).get("duration")
     storage.set_recording(
         call_id,
+        leg,
         status="done",
         analysis=results,
         audio_path=audio_path,

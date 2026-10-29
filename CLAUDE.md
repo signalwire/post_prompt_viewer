@@ -49,13 +49,15 @@ credentials). All runtime config is `PPV_*` env vars (see README + `config.py`).
   `lru_cache`d (tests call `get_settings.cache_clear()`).
 - `storage.py` — SQLite (WAL), one connection per operation. Tables: `calls`
   (verbatim JSON `payload` column + extracted index columns), `calls_fts` (FTS5
-  transcript search), `recordings`, `summaries`.
+  transcript search), `recordings` (keyed `(call_id, leg)` — one row per
+  recorded voice section), `summaries`.
 - `enrich.py` — **pure** payload → view models (no I/O): `derive_index`,
   `build_transcript`, `build_timeline`, `latency_series`, `align_latency`,
   `latency_breakdown`, `build_functions`, `totals`, `summary`, `safe_id`.
-- `recordings.py` — background `ThreadPoolExecutor`: download (SSRF-guarded
-  `_fetch`) → `latency_checker` `AudioAnalyzer` → ffmpeg transcode to a 16 kHz
-  mp3, then delete the original. Status/paths/results cached in `recordings`.
+- `recordings.py` — background `ThreadPoolExecutor`, one job per voice section:
+  download (SSRF-guarded `_fetch`) → `latency_checker` `AudioAnalyzer` → ffmpeg
+  transcode to a 16 kHz mp3, then delete the original. Status/paths/results
+  cached in `recordings`; files are named `<call>.leg<N>.*` beyond leg 1.
 - `web/routes_ingest.py` — `POST /collect` and `/` (webhook drop-in: full-payload
   store, `fetch_conversation` lookup, summary save; bad bodies dead-lettered) and
   `POST /upload`.
@@ -66,6 +68,20 @@ credentials). All runtime config is `PPV_*` env vars (see README + `config.py`).
   `latency.js` — no build step).
 
 ## Conventions and gotchas
+
+- **Conversation modes.** `enrich.conversation_mode` returns `voice` / `chat` /
+  `hybrid`, decided by the user turns (`content_type == "Detected Speech"` means
+  spoken), *not* by `conversation_type` — a chat that escalated to a call is
+  labelled `voice` while containing a whole text session. Mouth-to-ear and reply
+  time are computed independently so a hybrid reports both.
+- **Recordings are per voice section.** A conversation can toggle voice off and
+  on; `SWMLVars.section_recordings` lists one object per voice section, each with
+  its own `record_first_frame`. `leg` is the section's position in the
+  conversation, so numbers have gaps (`[1, 3]` = section 2 was chat). Every
+  alignment goes through `enrich._record_start(payload, leg)` — using one
+  section's anchor on another section's audio is the bug this prevents. Absent
+  the array, the scalar `record_call_url` is normalised to a single leg‑1
+  section, so consumers only ever see one shape.
 
 - **URLs are path-only.** `routes_view._path_url` replaces Starlette's absolute
   `url_for` (which would emit `http://127.0.0.1:PORT/...` and break behind an

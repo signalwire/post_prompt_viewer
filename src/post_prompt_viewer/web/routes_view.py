@@ -92,7 +92,13 @@ def _path_url(name, **params):
         "call_payload": f"/api/call/{cid}",
         "calls_delete": "/api/calls/delete",
     }
-    return f"{prefix}{table[name]}"
+    url = f"{prefix}{table[name]}"
+    # A conversation can hold several recorded voice sections; every
+    # recording-scoped URL is addressed by leg (omitted = the primary section).
+    leg = params.get("leg")
+    if leg is not None:
+        url += ("&" if "?" in url else "?") + f"leg={int(leg)}"
+    return url
 
 
 # Override Starlette's absolute url_for (set via setdefault at env init).
@@ -153,12 +159,21 @@ async def index(
 
 
 @router.get("/c/{call_id}", response_class=HTMLResponse, name="detail")
-async def detail(request: Request, call_id: str, src: str = "blessed"):
+async def detail(request: Request, call_id: str, src: str = "blessed",
+                 leg: Optional[int] = None):
     rec = storage.get_call(call_id)
     if rec is None:
         raise HTTPException(status_code=404, detail="unknown call")
     payload = rec["payload"]
-    recording = storage.get_recording(call_id) or {"status": "absent"}
+    # A conversation can toggle voice off and on; each voice section records to
+    # its own file, so the page shows one section at a time and `sections`
+    # drives the switcher. ``leg=None`` selects the primary (last) section, the
+    # one the scalar record_call_url refers to.
+    sects = enrich.sections(payload)
+    rec_rows = {r["leg"]: r for r in storage.get_recordings(call_id)}
+    legs = [x["leg"] for x in sects] or sorted(rec_rows) or [1]
+    sel_leg = int(leg) if (leg is not None and int(leg) in legs) else legs[-1]
+    recording = storage.get_recording(call_id, sel_leg) or {"status": "absent"}
     audio_present = bool(recording.get("audio_path")) and Path(recording["audio_path"]).exists()
     # Self-heal: if the cached audio was cleared but we still know where to fetch
     # it, re-process on view (when auto-analysis is enabled).
@@ -171,17 +186,26 @@ async def detail(request: Request, call_id: str, src: str = "blessed"):
         try:
             from .. import recordings
 
-            storage.set_recording(call_id, status="pending", error=None)
-            recordings.schedule_analysis(call_id)
-            recording = storage.get_recording(call_id) or recording
+            storage.set_recording(call_id, sel_leg, status="pending", error=None)
+            recordings.schedule_analysis(call_id, sel_leg)
+            recording = storage.get_recording(call_id, sel_leg) or recording
         except Exception:
             pass
     analysis = recording.get("analysis") if recording.get("status") == "done" else None
-    alignment = enrich.align_latency(payload, analysis) if analysis else None
+    alignment = enrich.align_latency(payload, analysis, sel_leg) if analysis else None
     waterfall = enrich.build_waterfall(payload)
     trace = enrich.build_trace(payload)
     events = enrich.build_events(payload)
-    wave_markers = enrich.wave_markers(payload)
+    wave_markers = enrich.wave_markers(payload, sel_leg)
+    # Section list for the switcher: payload metadata joined to fetch state.
+    section_view = [
+        {**sec,
+         "status": (rec_rows.get(sec["leg"]) or {}).get("status", "absent"),
+         "duration_s": (rec_rows.get(sec["leg"]) or {}).get("duration_s"),
+         "has_audio": bool((rec_rows.get(sec["leg"]) or {}).get("audio_path")),
+         "selected": sec["leg"] == sel_leg}
+        for sec in sects
+    ]
     # Summary stats over the per-turn mouth-to-ear latency.
     _tl = sorted(r["hero_ms"] for r in trace if r.get("hero_ms"))
     turn_stats = {
@@ -222,6 +246,8 @@ async def detail(request: Request, call_id: str, src: str = "blessed"):
             "functions": enrich.build_functions(payload),
             "global_data": payload.get("global_data"),
             "recording": recording,
+            "sections": section_view,
+            "sel_leg": sel_leg,
             "audio_present": audio_present,
             "analysis": analysis,
             "alignment": alignment,

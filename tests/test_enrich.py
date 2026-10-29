@@ -21,7 +21,7 @@ def test_derive_index(payload):
     idx = enrich.derive_index(payload, received_at_us=1)
     assert idx["call_id"] == "00000000-0000-4000-8000-000000000001"
     assert idx["app_name"] == "demo agent"
-    assert idx["has_recording"] is True
+    assert idx["has_recording"] == 1 and idx["num_recordings"] == 1
     assert idx["num_user_turns"] == 2
     assert idx["num_assistant_turns"] == 4   # 3 spoken + the tool-wait filler
     assert idx["duration_s"] == pytest.approx(90.0, abs=0.1)
@@ -377,6 +377,88 @@ def test_scorecard_from_global_data():
     assert m["frustration"]["good"] == 0.65  # inverted
     assert m["qualification"]["text"] == "strong"
     assert enrich.scorecard({"global_data": {}}) is None
+
+
+def test_sections_multi_voice_sections():
+    # A conversation can toggle voice off and on: each voice section records to
+    # its own file, listed in SWMLVars.section_recordings. leg is the section's
+    # position in the CONVERSATION, so chat sections leave gaps ([1, 3] = the
+    # middle section was chat).
+    base = 1_700_000_000_000_000
+    payload = {"SWMLVars": {
+        "record_call_url": "https://files/leg3.wav",      # scalar = LAST section
+        "record_first_frame": base + 600_000_000,
+        "section_recordings": [
+            {"leg": 3, "record_call_url": "https://files/leg3.wav",
+             "record_control_id": "ctl-3", "record_call_start": base + 599_900_000,
+             "record_first_frame": base + 600_000_000, "record_call_result": "success"},
+            {"leg": 1, "record_call_url": "https://files/leg1.wav",
+             "record_control_id": "ctl-1", "record_call_start": base + 9_900_000,
+             "record_first_frame": base + 10_000_000, "record_call_result": "success",
+             "record_future_field": "passed through"},
+        ],
+    }}
+    secs = enrich.sections(payload)
+    assert [x["leg"] for x in secs] == [1, 3]            # chronological, not input order
+    assert secs[0]["anchor_us"] == base + 10_000_000     # each anchors on its OWN first frame
+    assert secs[1]["anchor_us"] == base + 600_000_000
+    assert secs[0]["extra"] == {"record_future_field": "passed through"}   # verbatim passthrough
+    assert enrich.primary_leg(payload) == 3              # the scalar's section
+
+    # the anchor a consumer gets must follow the leg, or one section's turns
+    # would be positioned inside another section's audio
+    assert enrich._record_start(payload, 1) == base + 10_000_000
+    assert enrich._record_start(payload, 3) == base + 600_000_000
+    assert enrich._record_start(payload) == base + 600_000_000   # default: primary
+
+    # which section was recording at a given moment
+    assert enrich.section_for_ts(payload, base + 5_000_000) is None       # before any
+    assert enrich.section_for_ts(payload, base + 50_000_000)["leg"] == 1
+    assert enrich.section_for_ts(payload, base + 700_000_000)["leg"] == 3
+    assert enrich.section_by_leg(payload, 2) is None                      # chat section
+
+
+def test_sections_single_and_chat():
+    base = 1_700_000_000_000_000
+    # No section_recordings: a single voice section described by the scalars.
+    single = {"SWMLVars": {"record_call_url": "https://files/x.wav",
+                           "record_first_frame": base, "record_call_start": base - 110_000}}
+    secs = enrich.sections(single)
+    assert len(secs) == 1 and secs[0]["leg"] == 1
+    assert secs[0]["anchor_us"] == base          # first frame, not the relay-ack
+    # Chat-only: neither field, so no sections at all.
+    assert enrich.sections({"SWMLVars": {}}) == []
+    assert enrich.sections({}) == []
+
+
+def test_align_latency_is_scoped_to_one_section():
+    # A section's audio may only be compared against that section's own turns.
+    base = 1_700_000_000_000_000
+    a1, a3 = base, base + 600_000_000
+    payload = {
+        "SWMLVars": {"section_recordings": [
+            {"leg": 1, "record_call_url": "u1", "record_first_frame": a1},
+            {"leg": 3, "record_call_url": "u3", "record_first_frame": a3},
+        ]},
+        "call_log": [
+            # a turn in section 1 ...
+            {"role": "assistant", "content": "one", "timestamp": a1 + 5_200_000,
+             "start_timestamp": a1 + 5_000_000, "acoustic_latency": 1000,
+             "stamps_us": {"last_word_end": a1 + 4_000_000, "first_audio": a1 + 5_000_000}},
+            # ... and one in section 3
+            {"role": "assistant", "content": "three", "timestamp": a3 + 5_200_000,
+             "start_timestamp": a3 + 5_000_000, "acoustic_latency": 1000,
+             "stamps_us": {"last_word_end": a3 + 4_000_000, "first_audio": a3 + 5_000_000}},
+        ],
+    }
+    analysis = {"latencies": [{"human_stop": 4.0, "ai_start": 5.0, "latency": 1.0}],
+                "statistics": {"avg_latency": 1.0, "num_latencies": 1}}
+    # Each leg pairs with its own turn only - one match each, never both.
+    for leg in (1, 3):
+        out = enrich.align_latency(payload, analysis, leg)
+        assert out["matched"] == 1, leg
+        assert out["pairs"][0]["delta_ms"] == 0, leg
+    assert enrich.align_latency(payload, analysis, 2)["matched"] == 0   # chat section
 
 
 def test_record_start_prefers_first_frame():
